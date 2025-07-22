@@ -1,0 +1,386 @@
+import asyncio
+import logging
+import os
+import json
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional
+import numpy as np
+from telegram import Update
+from telegram.ext import Application, CommandHandler, ContextTypes
+from dotenv import load_dotenv
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+import time
+import threading
+
+from config import TELEGRAM_TOKEN, OWNER_ID
+from src.scanner import DexScreenerScanner
+from src.onchain_analyzer import OnchainAnalyzer
+from src.ai_trader import AITrader
+from src.wallet_manager import WalletManager
+from src.backtester import Backtester
+from src.logger import TradingLogger
+from src.performance_monitor import PerformanceMonitor
+
+# Load environment variables
+load_dotenv()
+
+# Setup logging
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
+class MemeBot:
+    def __init__(self):
+        self.scanner = DexScreenerScanner()
+        self.onchain_analyzer = OnchainAnalyzer()
+        self.ai_trader = AITrader()
+        self.wallet_manager = WalletManager()
+        self.backtester = Backtester()
+        self.trading_logger = TradingLogger()
+        self.performance_monitor = PerformanceMonitor()
+        
+        self.real_mode = False
+        self.scanning_active = True
+        self.scan_interval = 300  # 5 minutes default
+        
+        # Performance tracking
+        self.total_trades = 0
+        self.successful_trades = 0
+        self.total_profit_loss = 0.0
+        
+    async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Start command handler"""
+        if update.effective_user.id != OWNER_ID:
+            await update.message.reply_text("🚫 Unauthorized access!")
+            return
+            
+        await update.message.reply_text(
+            "🤖 **MemeBot AI Trading Bot**\n\n"
+            "Available commands:\n"
+            "/start - Show this menu\n"
+            "/status - Bot status and stats\n"
+            "/realmode on|off - Toggle real trading\n"
+            "/scan on|off - Toggle scanning\n"
+            "/setscan <minutes> - Set scan interval\n"
+            "/wallet - Wallet information\n"
+            "/top5 - Top 5 recent opportunities\n"
+            "/performance - Performance dashboard\n"
+            "/backtest - Run backtest\n"
+            "/logs - Recent trading logs\n"
+            "/alert on|off - Toggle alerts\n"
+            "/dump - Emergency stop all positions"
+        )
+    
+    async def status_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Status command handler"""
+        if update.effective_user.id != OWNER_ID:
+            await update.message.reply_text("🚫 Unauthorized access!")
+            return
+        
+        uptime = datetime.now() - self.start_time if hasattr(self, 'start_time') else timedelta(0)
+        success_rate = (self.successful_trades / max(self.total_trades, 1)) * 100
+        
+        status_msg = (
+            f"📊 **Bot Status**\n\n"
+            f"🟢 Online: {uptime}\n"
+            f"🔄 Real Mode: {'ON' if self.real_mode else 'OFF (Paper Trading)'}\n"
+            f"📡 Scanning: {'ON' if self.scanning_active else 'OFF'}\n"
+            f"⏱️ Scan Interval: {self.scan_interval}s\n"
+            f"📈 Total Trades: {self.total_trades}\n"
+            f"✅ Success Rate: {success_rate:.1f}%\n"
+            f"💰 P&L: {self.total_profit_loss:.4f} SOL\n"
+            f"💎 Wallet Balance: {await self.wallet_manager.get_sol_balance():.4f} SOL"
+        )
+        
+        await update.message.reply_text(status_msg)
+    
+    async def realmode_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Toggle real trading mode"""
+        if update.effective_user.id != OWNER_ID:
+            return
+            
+        if not context.args:
+            await update.message.reply_text("Usage: /realmode on|off")
+            return
+            
+        mode = context.args[0].lower()
+        if mode == "on":
+            if not self.wallet_manager.is_configured():
+                await update.message.reply_text("❌ Wallet not configured! Add private key first.")
+                return
+            self.real_mode = True
+            await update.message.reply_text("🚨 **REAL TRADING MODE ACTIVATED** 🚨\nBot will trade with real money!")
+        elif mode == "off":
+            self.real_mode = False
+            await update.message.reply_text("📝 Paper trading mode activated. No real money at risk.")
+        else:
+            await update.message.reply_text("Usage: /realmode on|off")
+    
+    async def scan_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Toggle scanning"""
+        if update.effective_user.id != OWNER_ID:
+            return
+            
+        if not context.args:
+            await update.message.reply_text("Usage: /scan on|off")
+            return
+            
+        mode = context.args[0].lower()
+        if mode == "on":
+            self.scanning_active = True
+            await update.message.reply_text("🔍 Token scanning activated!")
+        elif mode == "off":
+            self.scanning_active = False
+            await update.message.reply_text("⏸️ Token scanning paused.")
+        else:
+            await update.message.reply_text("Usage: /scan on|off")
+    
+    async def setscan_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Set scan interval"""
+        if update.effective_user.id != OWNER_ID:
+            return
+            
+        if not context.args:
+            await update.message.reply_text("Usage: /setscan <minutes>")
+            return
+            
+        try:
+            minutes = int(context.args[0])
+            if minutes < 1:
+                await update.message.reply_text("❌ Interval must be at least 1 minute")
+                return
+            self.scan_interval = minutes * 60
+            await update.message.reply_text(f"⏱️ Scan interval set to {minutes} minutes")
+        except ValueError:
+            await update.message.reply_text("❌ Please provide a valid number")
+    
+    async def wallet_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show wallet information"""
+        if update.effective_user.id != OWNER_ID:
+            return
+            
+        wallet_info = await self.wallet_manager.get_wallet_info()
+        await update.message.reply_text(
+            f"💎 **Wallet Information**\n\n"
+            f"Address: `{wallet_info['address']}`\n"
+            f"SOL Balance: {wallet_info['sol_balance']:.4f} SOL\n"
+            f"Token Count: {wallet_info['token_count']}\n"
+            f"Status: {'🟢 Connected' if wallet_info['connected'] else '🔴 Disconnected'}"
+        )
+    
+    async def top5_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show top 5 recent opportunities"""
+        if update.effective_user.id != OWNER_ID:
+            return
+            
+        opportunities = await self.ai_trader.get_top_opportunities()
+        msg = "🚀 **Top 5 Recent Opportunities**\n\n"
+        
+        for i, opp in enumerate(opportunities[:5], 1):
+            msg += f"{i}. {opp['symbol']} - Score: {opp['score']:.2f}\n"
+            msg += f"   💰 Volume: ${opp['volume']:,.0f}\n"
+            msg += f"   📈 Price Change: {opp['price_change']:+.1f}%\n\n"
+        
+        await update.message.reply_text(msg)
+    
+    async def performance_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show performance dashboard"""
+        if update.effective_user.id != OWNER_ID:
+            return
+            
+        metrics = await self.performance_monitor.get_metrics()
+        await update.message.reply_text(
+            f"📊 **Performance Dashboard**\n\n"
+            f"📈 24h Performance: {metrics['daily_performance']:+.2f}%\n"
+            f"📅 7d Performance: {metrics['weekly_performance']:+.2f}%\n"
+            f"🎯 Win Rate: {metrics['win_rate']:.1f}%\n"
+            f"💵 Avg Trade Size: {metrics['avg_trade_size']:.4f} SOL\n"
+            f"⏱️ Avg Hold Time: {metrics['avg_hold_time']}\n"
+            f"🔥 Best Trade: +{metrics['best_trade']:.2f}%\n"
+            f"❄️ Worst Trade: {metrics['worst_trade']:+.2f}%"
+        )
+    
+    async def backtest_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Run backtest"""
+        if update.effective_user.id != OWNER_ID:
+            return
+            
+        await update.message.reply_text("🧮 Running backtest... This may take a moment.")
+        results = await self.backtester.run_backtest(days=30)
+        
+        await update.message.reply_text(
+            f"📊 **30-Day Backtest Results**\n\n"
+            f"💰 Total Return: {results['total_return']:+.2f}%\n"
+            f"📈 Sharpe Ratio: {results['sharpe_ratio']:.2f}\n"
+            f"📉 Max Drawdown: -{results['max_drawdown']:.2f}%\n"
+            f"🎯 Win Rate: {results['win_rate']:.1f}%\n"
+            f"📊 Total Trades: {results['total_trades']}\n"
+            f"💎 Avg Trade: {results['avg_trade_return']:+.2f}%"
+        )
+    
+    async def logs_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show recent logs"""
+        if update.effective_user.id != OWNER_ID:
+            return
+            
+        logs = self.trading_logger.get_recent_logs(10)
+        msg = "📝 **Recent Trading Logs**\n\n"
+        
+        for log in logs:
+            msg += f"🕐 {log['timestamp']}\n"
+            msg += f"📊 {log['action']} - {log['symbol']}\n"
+            msg += f"💰 {log['amount']:.4f} SOL\n"
+            msg += f"📈 Result: {log['result']}\n\n"
+        
+        await update.message.reply_text(msg[:4000])  # Telegram message limit
+    
+    async def dump_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Emergency stop - sell all positions"""
+        if update.effective_user.id != OWNER_ID:
+            return
+            
+        if not self.real_mode:
+            await update.message.reply_text("📝 Paper trading mode - no real positions to close.")
+            return
+            
+        await update.message.reply_text("🚨 EMERGENCY STOP - Closing all positions!")
+        closed_positions = await self.wallet_manager.close_all_positions()
+        
+        await update.message.reply_text(
+            f"✅ Emergency stop completed!\n"
+            f"Closed {len(closed_positions)} positions\n"
+            f"Total recovered: {sum(p['amount'] for p in closed_positions):.4f} SOL"
+        )
+    
+    async def scan_and_trade(self):
+        """Main scanning and trading loop"""
+        while True:
+            try:
+                if not self.scanning_active:
+                    await asyncio.sleep(60)
+                    continue
+                
+                logger.info("🔍 Scanning for new opportunities...")
+                
+                # Get new tokens from DexScreener
+                new_tokens = await self.scanner.scan_new_tokens()
+                logger.info(f"Found {len(new_tokens)} new tokens")
+                
+                for token in new_tokens:
+                    try:
+                        # Enhanced onchain analysis
+                        onchain_data = await self.onchain_analyzer.analyze_token(token['address'])
+                        
+                        # Combine data for AI analysis
+                        combined_data = {**token, **onchain_data}
+                        
+                        # AI decision making
+                        trade_decision = await self.ai_trader.should_trade(combined_data)
+                        
+                        if trade_decision['should_trade']:
+                            logger.info(f"🎯 Trading opportunity: {token['symbol']} - Score: {trade_decision['confidence']:.2f}")
+                            
+                            if self.real_mode:
+                                # Execute real trade
+                                trade_result = await self.wallet_manager.execute_trade(
+                                    token_address=token['address'],
+                                    amount_sol=trade_decision['amount'],
+                                    action='buy'
+                                )
+                            else:
+                                # Paper trade
+                                trade_result = {
+                                    'success': True,
+                                    'amount': trade_decision['amount'],
+                                    'price': token['price'],
+                                    'type': 'paper'
+                                }
+                            
+                            # Log trade
+                            self.trading_logger.log_trade(token, trade_result, trade_decision)
+                            
+                            # Update AI model with result (for learning)
+                            self.ai_trader.update_model(combined_data, trade_result)
+                            
+                            # Update stats
+                            self.total_trades += 1
+                            if trade_result.get('success'):
+                                self.successful_trades += 1
+                    
+                    except Exception as e:
+                        logger.error(f"Error processing token {token.get('symbol', 'unknown')}: {e}")
+                
+                await asyncio.sleep(self.scan_interval)
+                
+            except Exception as e:
+                logger.error(f"Error in scan_and_trade loop: {e}")
+                await asyncio.sleep(60)  # Wait before retrying
+    
+    def setup_scheduler(self):
+        """Setup scheduled tasks"""
+        self.scheduler = AsyncIOScheduler()
+        
+        # Schedule AI model retraining every hour
+        self.scheduler.add_job(
+            self.ai_trader.retrain_model,
+            'interval',
+            hours=1,
+            id='retrain_model'
+        )
+        
+        # Schedule performance metrics update every 6 hours
+        self.scheduler.add_job(
+            self.performance_monitor.update_metrics,
+            'interval',
+            hours=6,
+            id='update_metrics'
+        )
+        
+        self.scheduler.start()
+
+async def main():
+    """Main function"""
+    bot = MemeBot()
+    bot.start_time = datetime.now()
+    
+    # Initialize Telegram bot
+    application = Application.builder().token(TELEGRAM_TOKEN).build()
+    
+    # Add command handlers
+    application.add_handler(CommandHandler("start", bot.start_command))
+    application.add_handler(CommandHandler("status", bot.status_command))
+    application.add_handler(CommandHandler("realmode", bot.realmode_command))
+    application.add_handler(CommandHandler("scan", bot.scan_command))
+    application.add_handler(CommandHandler("setscan", bot.setscan_command))
+    application.add_handler(CommandHandler("wallet", bot.wallet_command))
+    application.add_handler(CommandHandler("top5", bot.top5_command))
+    application.add_handler(CommandHandler("performance", bot.performance_command))
+    application.add_handler(CommandHandler("backtest", bot.backtest_command))
+    application.add_handler(CommandHandler("logs", bot.logs_command))
+    application.add_handler(CommandHandler("dump", bot.dump_command))
+    
+    # Setup scheduler
+    bot.setup_scheduler()
+    
+    # Start trading loop
+    trading_task = asyncio.create_task(bot.scan_and_trade())
+    
+    # Start Telegram bot
+    await application.initialize()
+    await application.start()
+    await application.updater.start_polling()
+    
+    logger.info("🤖 MemeBot is running!")
+    
+    try:
+        await trading_task
+    except KeyboardInterrupt:
+        logger.info("🛑 Bot shutting down...")
+    finally:
+        await application.stop()
+
+if __name__ == "__main__":
+    print("🚀 Starting MemeBot AI Trading Bot...")
+    asyncio.run(main())

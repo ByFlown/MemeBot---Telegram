@@ -1,0 +1,7 @@
+app = "memebot-ai"
+
+[env]
+  PORT = "8080"
+
+[build]
+  builder = "heroku/buildpacks:20"
