@@ -21,16 +21,23 @@ class DexScreenerScanner:
             )
         return self.session
     
-    async def scan_new_tokens(self, chain: str = "solana") -> List[Dict]:
-        """Scan for new tokens on specified chain"""
+    async def scan_all_tokens(self, chain: str = "solana") -> List[Dict]:
+        """Scan for ALL tokens on specified chain - no pre-filtering for AI learning"""
         try:
             session = await self.get_session()
             
             # Use working DexScreener endpoints for Solana tokens
             all_pairs = []
             
-            # Try direct search approaches that are known to work
-            search_queries = ["SOL", "USDC", "solana"]
+            # Comprehensive search to get maximum token variety for AI learning
+            search_queries = [
+                "SOL", "USDC", "USDT",  # Major tokens
+                "raydium", "orca", "jupiter",  # Major DEXes
+                "meme", "dog", "cat", "pepe",  # Meme categories  
+                "new", "launch", "token",  # New launches
+                "moon", "safe", "diamond",  # Common meme terms
+                "pump", "gem", "x100"  # High-risk terms
+            ]
             
             for query in search_queries:
                 try:
@@ -83,35 +90,42 @@ class DexScreenerScanner:
                 except Exception as e:
                     logger.error(f"Fallback method error: {e}")
             
-            # Filter for new tokens (created in last 24 hours)
-            new_tokens = []
+            # Process ALL tokens - let AI learn from everything
+            all_tokens = []
             current_time = datetime.utcnow()
             
             for pair in pairs:
                 try:
-                    # Parse creation time from timestamp
+                    token_data = self._extract_token_data(pair)
+                    
+                    # Add age calculation for AI features (but don't filter by it)
                     created_timestamp = pair.get('pairCreatedAt', 0)
                     if created_timestamp:
-                        created_at = datetime.fromtimestamp(created_timestamp / 1000)  # Convert ms to seconds
-                        
-                        # Only include tokens created in last 24 hours
-                        if (current_time - created_at) <= timedelta(hours=24):
-                            token_data = self._extract_token_data(pair)
-                            if self._is_valid_token(token_data):
-                                new_tokens.append(token_data)
+                        created_at = datetime.fromtimestamp(created_timestamp / 1000)
+                        age_hours = (current_time - created_at).total_seconds() / 3600
+                        token_data['age_hours'] = age_hours
+                        token_data['is_new'] = age_hours <= 24  # Feature for AI
                     else:
-                        # If no creation time, still process but mark as older
-                        token_data = self._extract_token_data(pair)
-                        if self._is_valid_token(token_data):
-                            new_tokens.append(token_data)
+                        token_data['age_hours'] = 999  # Unknown age
+                        token_data['is_new'] = False
+                    
+                    # Add risk indicators as features for AI learning
+                    token_data['risk_score'] = self._calculate_risk_score(token_data)
+                    token_data['volume_score'] = self._calculate_volume_score(token_data)
+                    token_data['liquidity_score'] = self._calculate_liquidity_score(token_data)
+                    
+                    # Only apply minimal validation
+                    if self._is_valid_token(token_data):
+                        all_tokens.append(token_data)
                 
                 except (ValueError, TypeError) as e:
                     logger.debug(f"Error parsing pair data: {e}")
                     continue
             
-            logger.info(f"Found {len(new_tokens)} new tokens from DexScreener")
-            # Sort by a combination of volume and transaction activity
-            return sorted(new_tokens, key=lambda x: (x['volume_24h'] * x['txns_1h']), reverse=True)
+            logger.info(f"Found {len(all_tokens)} tokens from DexScreener (no pre-filtering)")
+            
+            # Sort by recency and activity for AI to learn from fresh data first
+            return sorted(all_tokens, key=lambda x: (x['age_hours'] * -1, x['volume_24h']), reverse=False)
                 
         except Exception as e:
             logger.error(f"Error scanning DexScreener: {e}")
@@ -151,33 +165,122 @@ class DexScreenerScanner:
         }
     
     def _is_valid_token(self, token: Dict) -> bool:
-        """Filter tokens based on basic criteria"""
-        # Skip if missing critical data
-        if not token['address'] or not token['symbol']:
+        """Minimal validation - let AI learn from ALL data"""
+        # Only skip tokens with completely missing critical data
+        if not token.get('address') or not token.get('symbol'):
             return False
         
-        # Skip obvious scams/rugs
-        suspicious_symbols = ['TEST', 'SCAM', 'RUG', 'FAKE', 'HONEYPOT']
-        if any(sus in token['symbol'].upper() for sus in suspicious_symbols):
+        # Only skip completely broken price data
+        try:
+            price = float(token.get('price_usd', 0))
+            if price < 0:  # Negative prices are invalid
+                return False
+        except (ValueError, TypeError):
             return False
         
-        # Require minimum volume and transactions (adjusted for new API)
-        if token['volume_24h'] < 500:  # Minimum $500 24h volume
-            return False
-        
-        # Use 1h transactions as proxy since we have that data
-        if token['txns_1h'] < 3:  # Minimum 3 transactions per hour
-            return False
-        
-        # Require some liquidity
-        if token['liquidity_usd'] < 2000:  # Minimum $2000 liquidity
-            return False
-        
-        # Basic price validation
-        if token['price_usd'] <= 0:
-            return False
+        # That's it! Let the AI model learn from everything else:
+        # - Low volume tokens
+        # - New tokens with few transactions
+        # - Low liquidity tokens  
+        # - Suspicious looking symbols
+        # - High risk tokens
+        # The model will learn which patterns lead to good vs bad trades
         
         return True
+    
+    def _calculate_risk_score(self, token: Dict) -> float:
+        """Calculate risk score (0-10, higher = riskier) for AI learning"""
+        risk_score = 0.0
+        
+        # Symbol-based risk indicators
+        symbol = token.get('symbol', '').upper()
+        suspicious_keywords = ['SCAM', 'RUG', 'FAKE', 'TEST', 'HONEYPOT', 'PONZI', 'PUMP', 'DUMP']
+        meme_keywords = ['DOGE', 'SHIB', 'PEPE', 'FLOKI', 'SAFE', 'MOON', 'ROCKET', 'DIAMOND']
+        
+        for keyword in suspicious_keywords:
+            if keyword in symbol:
+                risk_score += 3.0
+        
+        for keyword in meme_keywords:
+            if keyword in symbol:
+                risk_score += 1.0
+        
+        # Age-based risk
+        age_hours = token.get('age_hours', 999)
+        if age_hours < 1:
+            risk_score += 2.0  # Very new = risky
+        elif age_hours < 24:
+            risk_score += 1.0  # New = somewhat risky
+        
+        # Volume-based risk  
+        volume_24h = token.get('volume_24h', 0)
+        if volume_24h < 100:
+            risk_score += 2.0  # Very low volume
+        elif volume_24h < 1000:
+            risk_score += 1.0  # Low volume
+        
+        # Liquidity-based risk
+        liquidity_usd = token.get('liquidity_usd', 0)
+        if liquidity_usd < 1000:
+            risk_score += 2.0  # Very low liquidity
+        elif liquidity_usd < 5000:
+            risk_score += 1.0  # Low liquidity
+        
+        return min(risk_score, 10.0)  # Cap at 10
+    
+    def _calculate_volume_score(self, token: Dict) -> float:
+        """Calculate volume activity score (0-10, higher = more active)"""
+        volume_24h = token.get('volume_24h', 0)
+        txns_1h = token.get('txns_1h', 0)
+        
+        # Volume scoring
+        if volume_24h >= 1000000:  # $1M+
+            volume_score = 10.0
+        elif volume_24h >= 100000:  # $100K+
+            volume_score = 8.0
+        elif volume_24h >= 10000:  # $10K+
+            volume_score = 6.0
+        elif volume_24h >= 1000:   # $1K+
+            volume_score = 4.0
+        elif volume_24h >= 100:    # $100+
+            volume_score = 2.0
+        else:
+            volume_score = 0.0
+        
+        # Transaction frequency bonus
+        if txns_1h >= 100:
+            volume_score += 2.0
+        elif txns_1h >= 10:
+            volume_score += 1.0
+        elif txns_1h >= 1:
+            volume_score += 0.5
+        
+        return min(volume_score, 10.0)
+    
+    def _calculate_liquidity_score(self, token: Dict) -> float:
+        """Calculate liquidity score (0-10, higher = more liquid)"""
+        liquidity_usd = token.get('liquidity_usd', 0)
+        
+        if liquidity_usd >= 1000000:  # $1M+
+            return 10.0
+        elif liquidity_usd >= 100000:  # $100K+
+            return 8.0
+        elif liquidity_usd >= 50000:   # $50K+
+            return 6.0
+        elif liquidity_usd >= 10000:   # $10K+
+            return 4.0
+        elif liquidity_usd >= 5000:    # $5K+
+            return 3.0
+        elif liquidity_usd >= 1000:    # $1K+
+            return 2.0
+        elif liquidity_usd > 0:
+            return 1.0
+        else:
+            return 0.0
+    
+    async def scan_new_tokens(self, chain: str = "solana") -> List[Dict]:
+        """Backwards compatibility - calls scan_all_tokens"""
+        return await self.scan_all_tokens(chain)
     
     async def get_token_details(self, token_address: str) -> Optional[Dict]:
         """Get detailed information for a specific token"""

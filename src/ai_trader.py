@@ -250,22 +250,31 @@ class AITrader:
             combined_confidence = (ml_decision['confidence'] * ml_weight + 
                                  rl_decision['confidence'] * rl_weight)
             
-            # Risk assessment
+            # Risk assessment (for information only - not filtering)
             risk_score = token_data.get('risk_score', 5.0)
             
-            # Final decision logic
-            should_trade = (
-                combined_confidence > self.min_confidence_threshold and
-                risk_score < self.max_risk_threshold and
-                token_data.get('volume_24h', 0) > 10000  # Minimum volume
-            )
+            # NEW APPROACH: Let AI decide completely based on learned patterns
+            # No hard filtering - the model learns from ALL trading experiences
+            should_trade = combined_confidence > 0.5  # Very low threshold
             
-            # Calculate position size based on confidence and risk
+            # Dynamic position sizing based on AI confidence and calculated risk
             if should_trade:
+                # Base position size
                 base_size = self.position_size_factor
-                confidence_multiplier = min(combined_confidence * 1.5, 1.0)
-                risk_multiplier = max(1 - (risk_score / 10), 0.1)
-                position_size = base_size * confidence_multiplier * risk_multiplier
+                
+                # Scale by confidence (0.1x to 2.0x multiplier)
+                confidence_multiplier = max(0.1, min(combined_confidence * 2.0, 2.0))
+                
+                # Scale by inverse risk (high risk = smaller position)
+                risk_multiplier = max(0.05, (10 - risk_score) / 10)
+                
+                # Scale by token age (newer = smaller position for safety)  
+                age_hours = token_data.get('age_hours', 999)
+                age_multiplier = min(1.0, max(0.1, age_hours / 24))
+                
+                # Final position size
+                position_size = base_size * confidence_multiplier * risk_multiplier * age_multiplier
+                position_size = max(0.001, min(position_size, 0.5))  # Cap between 0.1% and 50%
             else:
                 position_size = 0.0
             
@@ -290,23 +299,46 @@ class AITrader:
             }
     
     def _extract_features(self, token_data: Dict) -> np.ndarray:
-        """Extract numerical features for ML models"""
+        """Extract numerical features for ML models - enhanced for unfiltered data"""
         features = [
-            token_data.get('price_usd', 0),
-            token_data.get('volume_24h', 0),
-            token_data.get('volume_1h', 0),
-            token_data.get('price_change_24h', 0),
-            token_data.get('price_change_1h', 0),
-            token_data.get('liquidity_usd', 0),
-            token_data.get('txns_24h', 0),
-            token_data.get('market_cap', 0),
-            token_data.get('risk_score', 5.0),
-            token_data.get('confidence_score', 5.0),
-            token_data.get('holder_concentration', 50),
-            token_data.get('top_10_percentage', 50),
-            token_data.get('social_sentiment_score', 5.0),
-            token_data.get('community_activity_score', 5.0)
+            # Price and market data
+            float(token_data.get('price_usd', 0)),
+            float(token_data.get('volume_24h', 0)),
+            float(token_data.get('volume_1h', 0)),
+            float(token_data.get('price_change_24h', 0)),
+            float(token_data.get('price_change_1h', 0)),
+            float(token_data.get('liquidity_usd', 0)),
+            float(token_data.get('market_cap', 0)),
+            
+            # Transaction activity  
+            float(token_data.get('txns_24h', 0)),
+            float(token_data.get('txns_1h', 0)),
+            float(token_data.get('txns_5m', 0)),
+            
+            # AI-calculated risk indicators
+            float(token_data.get('risk_score', 5.0)),
+            float(token_data.get('volume_score', 5.0)),  
+            float(token_data.get('liquidity_score', 5.0)),
+            
+            # Age and novelty features
+            float(token_data.get('age_hours', 999)),
+            float(1.0 if token_data.get('is_new', False) else 0.0),
+            
+            # Derived features for AI learning
+            float(np.log10(max(token_data.get('volume_24h', 1), 1))),  # Log volume
+            float(np.log10(max(token_data.get('liquidity_usd', 1), 1))),  # Log liquidity
+            float(token_data.get('txns_1h', 0) / max(token_data.get('volume_24h', 1), 1) * 1000),  # Txn efficiency
+            
+            # Legacy features for compatibility
+            float(token_data.get('confidence_score', 5.0)),
+            float(token_data.get('holder_concentration', 50)),
+            float(token_data.get('top_10_percentage', 50)),
+            float(token_data.get('social_sentiment_score', 5.0)),
+            float(token_data.get('community_activity_score', 5.0))
         ]
+        
+        # Handle NaN/inf values
+        features = [f if np.isfinite(f) else 0.0 for f in features]
         
         return np.array(features).reshape(1, -1)
     

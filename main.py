@@ -270,13 +270,13 @@ class MemeBot:
                     await asyncio.sleep(60)
                     continue
                 
-                logger.info("🔍 Scanning for new opportunities...")
+                logger.info("🔍 Scanning for ALL token opportunities (unfiltered)...")
                 
-                # Get new tokens from DexScreener
-                new_tokens = await self.scanner.scan_new_tokens()
-                logger.info(f"Found {len(new_tokens)} new tokens")
+                # Get ALL tokens from DexScreener for AI learning
+                all_tokens = await self.scanner.scan_new_tokens()
+                logger.info(f"Found {len(all_tokens)} tokens for AI analysis")
                 
-                for token in new_tokens:
+                for token in all_tokens:
                     try:
                         # Enhanced onchain analysis
                         onchain_data = await self.onchain_analyzer.analyze_token(token['address'])
