@@ -26,40 +26,69 @@ class DexScreenerScanner:
         try:
             session = await self.get_session()
             
-            # Get recent pairs with high volume
-            url = f"{self.base_url}/pairs/{chain}?order=txns24h&limit=100"
+            # Multiple strategies to get Solana pairs from different DEXes
+            urls = [
+                f"https://api.dexscreener.com/latest/dex/search?q=SOL",  # Search for SOL pairs
+                f"https://api.dexscreener.com/latest/dex/search?q=raydium",  # Raydium DEX
+                f"https://api.dexscreener.com/latest/dex/search?q=orca",     # Orca DEX
+            ]
             
-            async with session.get(url) as response:
-                if response.status != 200:
-                    logger.error(f"DexScreener API error: {response.status}")
-                    return []
-                
-                data = await response.json()
-                pairs = data.get('pairs', [])
-                
-                # Filter for new tokens (created in last 24 hours)
-                new_tokens = []
-                current_time = datetime.utcnow()
-                
-                for pair in pairs:
-                    try:
-                        # Parse creation time
-                        created_at = datetime.fromisoformat(
-                            pair.get('pairCreatedAt', '').replace('Z', '+00:00')
-                        )
+            all_pairs = []
+            
+            for search_url in urls:
+                try:
+                    async with session.get(search_url) as search_response:
+                        if search_response.status == 200:
+                            search_data = await search_response.json()
+                            pairs = search_data.get('pairs', [])
+                            # Filter for Solana chain
+                            solana_pairs = [p for p in pairs if p.get('chainId') == 'solana']
+                            all_pairs.extend(solana_pairs)
+                        await asyncio.sleep(0.1)  # Rate limiting
+                except Exception as e:
+                    logger.debug(f"Search URL {search_url} failed: {e}")
+                    continue"
+            
+            # Remove duplicates and use all collected pairs
+            pairs = []
+            seen_addresses = set()
+            for pair in all_pairs:
+                pair_addr = pair.get('pairAddress', '')
+                if pair_addr and pair_addr not in seen_addresses:
+                    pairs.append(pair)
+                    seen_addresses.add(pair_addr)
+                    
+            logger.info(f"Collected {len(pairs)} unique Solana pairs from search")
+            
+            # Filter for new tokens (created in last 24 hours)
+            new_tokens = []
+            current_time = datetime.utcnow()
+            
+            for pair in pairs:
+                try:
+                    # Parse creation time from timestamp
+                    created_timestamp = pair.get('pairCreatedAt', 0)
+                    if created_timestamp:
+                        created_at = datetime.fromtimestamp(created_timestamp / 1000)  # Convert ms to seconds
                         
                         # Only include tokens created in last 24 hours
                         if (current_time - created_at) <= timedelta(hours=24):
                             token_data = self._extract_token_data(pair)
                             if self._is_valid_token(token_data):
                                 new_tokens.append(token_data)
-                    
-                    except (ValueError, TypeError) as e:
-                        logger.debug(f"Error parsing pair data: {e}")
-                        continue
+                    else:
+                        # If no creation time, still process but mark as older
+                        token_data = self._extract_token_data(pair)
+                        if self._is_valid_token(token_data):
+                            new_tokens.append(token_data)
                 
-                logger.info(f"Found {len(new_tokens)} new tokens from DexScreener")
-                return sorted(new_tokens, key=lambda x: x['volume_24h'], reverse=True)
+                except (ValueError, TypeError) as e:
+                    logger.debug(f"Error parsing pair data: {e}")
+                    continue
+            
+            logger.info(f"Found {len(new_tokens)} new tokens from DexScreener")
+            # Sort by a combination of volume and transaction activity
+            return sorted(new_tokens, key=lambda x: (x['volume_24h'] * x['txns_1h']), reverse=True)
                 
         except Exception as e:
             logger.error(f"Error scanning DexScreener: {e}")
@@ -68,6 +97,13 @@ class DexScreenerScanner:
     def _extract_token_data(self, pair: Dict) -> Dict:
         """Extract relevant token data from DexScreener pair"""
         base_token = pair.get('baseToken', {})
+        txns = pair.get('txns', {})
+        volume = pair.get('volume', {})
+        liquidity = pair.get('liquidity', {})
+        
+        # Calculate total transactions (m5 and h1 available in new API)
+        txns_5m = txns.get('m5', 0)
+        txns_1h = txns.get('h1', 0)
         
         return {
             'symbol': base_token.get('symbol', 'UNKNOWN'),
@@ -75,18 +111,19 @@ class DexScreenerScanner:
             'address': base_token.get('address', ''),
             'price': float(pair.get('priceNative', 0)),
             'price_usd': float(pair.get('priceUsd', 0)),
-            'volume_24h': float(pair.get('volume', {}).get('h24', 0)),
-            'volume_1h': float(pair.get('volume', {}).get('h1', 0)),
-            'txns_24h': int(pair.get('txns', {}).get('h24', {}).get('buys', 0) + 
-                            pair.get('txns', {}).get('h24', {}).get('sells', 0)),
+            'volume_24h': float(volume.get('h24', 0)),
+            'volume_1h': float(volume.get('h1', 0)),
+            'txns_24h': int(txns_1h * 24) if txns_1h > 0 else 0,  # Estimate 24h from 1h
+            'txns_1h': int(txns_1h),
+            'txns_5m': int(txns_5m),
             'price_change_24h': float(pair.get('priceChange', {}).get('h24', 0)),
             'price_change_1h': float(pair.get('priceChange', {}).get('h1', 0)),
-            'liquidity_usd': float(pair.get('liquidity', {}).get('usd', 0)),
-            'market_cap': float(pair.get('marketCap', 0)),
+            'liquidity_usd': float(liquidity.get('usd', 0)),
+            'market_cap': float(pair.get('fdv', 0)),  # Use fdv (fully diluted valuation)
             'dex': pair.get('dexId', ''),
             'pair_address': pair.get('pairAddress', ''),
-            'created_at': pair.get('pairCreatedAt', ''),
-            'chain_id': pair.get('chainId', ''),
+            'created_at': pair.get('pairCreatedAt', 0),
+            'chain_id': pair.get('chainId', 'solana'),
             'source': 'dexscreener'
         }
     
@@ -97,19 +134,24 @@ class DexScreenerScanner:
             return False
         
         # Skip obvious scams/rugs
-        suspicious_symbols = ['TEST', 'SCAM', 'RUG', 'FAKE']
+        suspicious_symbols = ['TEST', 'SCAM', 'RUG', 'FAKE', 'HONEYPOT']
         if any(sus in token['symbol'].upper() for sus in suspicious_symbols):
             return False
         
-        # Require minimum volume and transactions
-        if token['volume_24h'] < 1000:  # Minimum $1000 24h volume
+        # Require minimum volume and transactions (adjusted for new API)
+        if token['volume_24h'] < 500:  # Minimum $500 24h volume
             return False
         
-        if token['txns_24h'] < 50:  # Minimum 50 transactions
+        # Use 1h transactions as proxy since we have that data
+        if token['txns_1h'] < 3:  # Minimum 3 transactions per hour
             return False
         
         # Require some liquidity
-        if token['liquidity_usd'] < 5000:  # Minimum $5000 liquidity
+        if token['liquidity_usd'] < 2000:  # Minimum $2000 liquidity
+            return False
+        
+        # Basic price validation
+        if token['price_usd'] <= 0:
             return False
         
         return True
