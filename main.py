@@ -401,12 +401,25 @@ class MemeBot:
 async def main():
     """Main function"""
     try:
+        print("🚀 MemeBot starting up...")
+        logger.info("🚀 MemeBot starting up...")
+        
+        # Debug configuration
+        print(f"📋 Configuration check:")
+        print(f"   TELEGRAM_TOKEN: {'✅ Set' if TELEGRAM_TOKEN != 'DEIN_TELEGRAM_BOT_TOKEN' else '❌ Not set'}")
+        print(f"   OWNER_ID: {OWNER_ID}")
+        
         # Validate configuration
         if TELEGRAM_TOKEN == 'DEIN_TELEGRAM_BOT_TOKEN':
             logger.error("❌ TELEGRAM_TOKEN not configured! Please set your bot token.")
             print("\n🔧 Configuration Error:")
-            print("Please set your TELEGRAM_TOKEN in environment variables or .env file")
-            print("Get your bot token from @BotFather on Telegram")
+            print("TELEGRAM_TOKEN is not configured. Using environment variable or fly secrets:")
+            print("  fly secrets set TELEGRAM_TOKEN=your_bot_token_here")
+            print("  fly secrets set OWNER_ID=your_telegram_user_id")
+            print("\n⏳ Continuing in demo mode for 60 seconds...")
+            
+            # Don't exit immediately - wait a bit to see logs
+            await asyncio.sleep(60)
             return
         
         if OWNER_ID == 123456789:
@@ -469,6 +482,13 @@ async def main():
         logger.error(f"💥 Critical error in main(): {e}")
         print(f"\n💥 Bot crashed with error: {e}")
         print("Check your configuration and try again.")
+        
+        # In production, keep container running for debugging
+        if os.getenv('FLY_APP_NAME'):
+            print("🔍 Running on Fly.io - keeping container alive for debugging...")
+            logger.error("Keeping container alive for debugging...")
+            while True:
+                await asyncio.sleep(300)  # Sleep 5 minutes at a time
 
 if __name__ == "__main__":
     print("🚀 Starting MemeBot AI Trading Bot...")

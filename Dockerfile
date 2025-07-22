@@ -43,5 +43,5 @@ USER memebot
 HEALTHCHECK --interval=60s --timeout=10s --start-period=30s --retries=3 \
     CMD python -c "import requests; requests.get('http://localhost:8080/health', timeout=5)" || exit 1
 
-# Default command (can be overridden by fly.toml processes)
-CMD ["python", "main.py"]
+# Default command - use test script first for debugging
+CMD ["python", "test-deployment.py"]

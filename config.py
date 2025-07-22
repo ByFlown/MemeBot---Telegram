@@ -53,9 +53,11 @@ WEBHOOK_SECRET = os.getenv('WEBHOOK_SECRET', '')
 DEBUG_MODE = os.getenv('DEBUG_MODE', 'false').lower() == 'true'
 PAPER_TRADING_ONLY = os.getenv('PAPER_TRADING_ONLY', 'true').lower() == 'true'
 
-print(f"✅ Configuration loaded:")
-print(f"   - Telegram Token: {'✅ Set' if TELEGRAM_TOKEN != 'DEIN_TELEGRAM_BOT_TOKEN' else '❌ Not set'}")
-print(f"   - Owner ID: {OWNER_ID}")
-print(f"   - Real Trading: {'🚨 ENABLED' if REAL_TRADING_ENABLED else '📝 Paper only'}")
-print(f"   - Wallet: {'✅ Configured' if SOLANA_PRIVATE_KEY else '❌ Not configured'}")
-print(f"   - Debug Mode: {'ON' if DEBUG_MODE else 'OFF'}")
+# Only print configuration in local development, not in production
+if not os.getenv('FLY_APP_NAME'):  # Only print locally, not on Fly.io
+    print(f"✅ Configuration loaded:")
+    print(f"   - Telegram Token: {'✅ Set' if TELEGRAM_TOKEN != 'DEIN_TELEGRAM_BOT_TOKEN' else '❌ Not set'}")
+    print(f"   - Owner ID: {OWNER_ID}")
+    print(f"   - Real Trading: {'🚨 ENABLED' if REAL_TRADING_ENABLED else '📝 Paper only'}")
+    print(f"   - Wallet: {'✅ Configured' if SOLANA_PRIVATE_KEY else '❌ Not configured'}")
+    print(f"   - Debug Mode: {'ON' if DEBUG_MODE else 'OFF'}")
