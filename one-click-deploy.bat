@@ -75,6 +75,48 @@ if %errorlevel% neq 0 (
 
 echo ✅ Authenticated with Fly.io
 
+REM Validate fly.toml configuration
+echo.
+echo 🔍 Validating fly.toml configuration...
+if not exist "fly.toml" (
+    echo ❌ fly.toml not found in current directory
+    echo Current directory: %CD%
+    pause
+    exit /b 1
+)
+
+REM Check for common TOML issues
+findstr /C:"[mounts]" fly.toml >nul
+if %errorlevel% equ 0 (
+    echo ⚠️ Found potential TOML syntax issue in fly.toml
+    echo Fixing mount sections...
+    
+    REM Create backup
+    copy fly.toml fly.toml.backup >nul
+    
+    REM Fix mount sections (basic replacement)
+    powershell -Command "(Get-Content fly.toml) -replace '^\[mounts\]', '[[mounts]]' | Set-Content fly.toml"
+    
+    echo ✅ Fixed mount section syntax
+)
+
+REM Validate with flyctl if possible
+flyctl config validate >nul 2>nul
+if %errorlevel% neq 0 (
+    echo ⚠️ fly.toml has configuration issues
+    echo Running flyctl config validate for details...
+    flyctl config validate
+    echo.
+    set /p continue="Continue anyway? (y/N): "
+    if /i "!continue!" neq "y" (
+        echo Deployment cancelled
+        pause
+        exit /b 1
+    )
+) else (
+    echo ✅ fly.toml configuration is valid
+)
+
 REM Check for .env file
 if exist ".env" (
     echo ✅ Found .env file
@@ -103,10 +145,65 @@ echo.
 echo 📋 Collecting deployment information...
 echo.
 
-REM App name
+REM App name with validation
+:get_app_name
 if "!FLY_APP_NAME!"=="" (
+    echo.
+    echo 📝 App Name Configuration
+    echo App names must be:
+    echo   - 3-30 characters long
+    echo   - Only lowercase letters, numbers, and hyphens
+    echo   - Unique across all Fly.io apps
+    echo.
+    echo Examples: memebot-ai, my-trading-bot, solana-trader-123
+    echo.
     set /p FLY_APP_NAME="Enter app name (default: memebot-ai): "
     if "!FLY_APP_NAME!"=="" set FLY_APP_NAME=memebot-ai
+)
+
+REM Validate app name
+echo !FLY_APP_NAME! | findstr /R "^[a-z0-9-]*$" >nul
+if !errorlevel! neq 0 (
+    echo ❌ Invalid app name. Use only lowercase letters, numbers, and hyphens.
+    set FLY_APP_NAME=
+    goto get_app_name
+)
+
+REM Check length
+set app_name_length=0
+set temp_name=!FLY_APP_NAME!
+:count_loop
+if defined temp_name (
+    set temp_name=!temp_name:~1!
+    set /a app_name_length+=1
+    goto count_loop
+)
+
+if !app_name_length! lss 3 (
+    echo ❌ App name must be at least 3 characters long.
+    set FLY_APP_NAME=
+    goto get_app_name
+)
+
+if !app_name_length! gtr 30 (
+    echo ❌ App name must be less than 30 characters long.
+    set FLY_APP_NAME=
+    goto get_app_name
+)
+
+REM Check if app name is available
+echo 🔍 Checking if app name '!FLY_APP_NAME!' is available...
+flyctl apps list | findstr "!FLY_APP_NAME!" >nul
+if !errorlevel! equ 0 (
+    echo ⚠️ App name '!FLY_APP_NAME!' already exists in your account.
+    set /p use_existing="Use existing app '!FLY_APP_NAME!'? (Y/n): "
+    if /i "!use_existing!"=="n" (
+        echo Please choose a different name.
+        set FLY_APP_NAME=
+        goto get_app_name
+    )
+) else (
+    echo ✅ App name '!FLY_APP_NAME!' is available!
 )
 
 REM Telegram configuration
@@ -172,14 +269,45 @@ if %errorlevel% equ 0 (
     echo ✅ App '!FLY_APP_NAME!' already exists
 ) else (
     echo 📝 Creating app '!FLY_APP_NAME!'...
-    flyctl apps create "!FLY_APP_NAME!"
+    flyctl apps create "!FLY_APP_NAME!" --org personal
     if !errorlevel! neq 0 (
-        echo ❌ Failed to create app
-        pause
-        exit /b 1
+        echo ❌ Failed to create app '!FLY_APP_NAME!'
+        echo.
+        echo App name might be taken globally. Try these alternatives:
+        echo   !FLY_APP_NAME!-%RANDOM%
+        echo   !FLY_APP_NAME!-%USERNAME%
+        echo   !FLY_APP_NAME!-trading
+        echo   !FLY_APP_NAME!-bot
+        echo.
+        set /p new_name="Enter a different app name: "
+        if "!new_name!" neq "" (
+            set FLY_APP_NAME=!new_name!
+            flyctl apps create "!FLY_APP_NAME!" --org personal
+            if !errorlevel! neq 0 (
+                echo ❌ Failed to create app with new name
+                pause
+                exit /b 1
+            )
+            echo ✅ App '!FLY_APP_NAME!' created!
+        ) else (
+            echo No alternative name provided
+            pause
+            exit /b 1
+        )
+    ) else (
+        echo ✅ App '!FLY_APP_NAME!' created successfully!
     )
-    echo ✅ App created
 )
+
+REM Update fly.toml with app name
+echo 📝 Updating fly.toml configuration...
+copy fly.toml fly.toml.backup >nul
+
+REM Use PowerShell to update the TOML file
+powershell -Command "(Get-Content fly.toml) -replace 'app = \".*\"', 'app = \"!FLY_APP_NAME!\"' | Set-Content fly.toml"
+powershell -Command "(Get-Content fly.toml) -replace 'primary_region = \".*\"', 'primary_region = \"fra\"' | Set-Content fly.toml"
+
+echo ✅ fly.toml updated with app: !FLY_APP_NAME!
 
 REM Create volumes
 echo.

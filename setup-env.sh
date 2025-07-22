@@ -67,9 +67,55 @@ print_status "Setting up new configuration..."
 # Collect information
 echo ""
 print_status "App Configuration"
-read -p "App name (default: memebot-ai): " APP_NAME
-APP_NAME=${APP_NAME:-memebot-ai}
 
+# App name with validation
+while true; do
+    echo ""
+    echo "🏷️  App Name Requirements:"
+    echo "   - 3-30 characters long"
+    echo "   - Only lowercase letters, numbers, and hyphens"
+    echo "   - Must be unique across all Fly.io apps globally"
+    echo ""
+    echo "💡 Suggestions:"
+    echo "   - memebot-$(whoami)     (personalized)"
+    echo "   - memebot-$(date +%m%d) (with date)"
+    echo "   - solana-trader-bot     (descriptive)"
+    echo "   - my-trading-bot-ai     (custom name)"
+    echo ""
+    
+    read -p "App name (default: memebot-ai): " APP_NAME
+    APP_NAME=${APP_NAME:-memebot-ai}
+    
+    # Validate app name format
+    if [[ ! "$APP_NAME" =~ ^[a-z0-9-]+$ ]]; then
+        print_error "❌ Invalid format. Use only lowercase letters, numbers, and hyphens."
+        continue
+    fi
+    
+    # Validate length
+    if [[ ${#APP_NAME} -lt 3 ]]; then
+        print_error "❌ Too short. App name must be at least 3 characters."
+        continue
+    fi
+    
+    if [[ ${#APP_NAME} -gt 30 ]]; then
+        print_error "❌ Too long. App name must be less than 30 characters."
+        continue
+    fi
+    
+    print_success "✅ App name '$APP_NAME' looks good!"
+    break
+done
+
+# Region selection
+echo ""
+echo "🌍 Available Regions:"
+echo "   fra - Frankfurt, Germany (EU, low latency to Europe)"
+echo "   iad - Washington D.C., USA (US East, good for Solana RPC)"
+echo "   lax - Los Angeles, USA (US West)"
+echo "   sin - Singapore (Asia Pacific)"
+echo "   syd - Sydney, Australia (Oceania)"
+echo ""
 read -p "Fly.io region (default: fra): " REGION
 REGION=${REGION:-fra}
 

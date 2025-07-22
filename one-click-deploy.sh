@@ -229,11 +229,49 @@ collect_info() {
         fi
     fi
     
-    # App name
-    if [[ -z "$APP_NAME" ]]; then
+    # App name with validation
+    while [[ -z "$APP_NAME" ]]; do
         read -p "Enter app name (default: memebot-ai): " INPUT_APP_NAME
         APP_NAME=${INPUT_APP_NAME:-memebot-ai}
-    fi
+        
+        # Validate app name (Fly.io requirements)
+        if [[ ! "$APP_NAME" =~ ^[a-z0-9-]+$ ]]; then
+            print_error "Invalid app name. Use only lowercase letters, numbers, and hyphens."
+            print_status "Examples: memebot-ai, my-trading-bot, solana-trader-123"
+            APP_NAME=""
+            continue
+        fi
+        
+        if [[ ${#APP_NAME} -lt 3 ]]; then
+            print_error "App name must be at least 3 characters long."
+            APP_NAME=""
+            continue
+        fi
+        
+        if [[ ${#APP_NAME} -gt 30 ]]; then
+            print_error "App name must be less than 30 characters long."
+            APP_NAME=""
+            continue
+        fi
+        
+        # Check if name is available
+        if command -v flyctl >/dev/null 2>&1; then
+            print_status "Checking if app name '$APP_NAME' is available..."
+            if flyctl apps list 2>/dev/null | grep -q "^$APP_NAME\s"; then
+                print_warning "App name '$APP_NAME' already exists in your account."
+                read -p "Use existing app '$APP_NAME'? [y/N]: " use_existing
+                if [[ "$use_existing" != "y" && "$use_existing" != "Y" ]]; then
+                    print_status "Please choose a different name."
+                    APP_NAME=""
+                    continue
+                fi
+            else
+                print_success "App name '$APP_NAME' is available!"
+            fi
+        fi
+        
+        break
+    done
     
     # Region  
     if [[ -z "$REGION" ]]; then
@@ -307,15 +345,46 @@ setup_app() {
         print_success "App '$APP_NAME' already exists"
     else
         print_status "Creating app '$APP_NAME'..."
-        flyctl apps create "$APP_NAME" --org personal
-        print_success "App created"
+        
+        # Try to create app with error handling
+        if flyctl apps create "$APP_NAME" --org personal; then
+            print_success "App '$APP_NAME' created successfully!"
+        else
+            print_error "Failed to create app '$APP_NAME'"
+            
+            # Suggest alternative names
+            print_status "App name might be taken globally. Try these alternatives:"
+            echo "  ${APP_NAME}-$(date +%m%d)"
+            echo "  ${APP_NAME}-$(whoami)"
+            echo "  ${APP_NAME}-trading"
+            echo "  ${APP_NAME}-bot"
+            echo ""
+            
+            read -p "Enter a different app name: " NEW_APP_NAME
+            if [[ -n "$NEW_APP_NAME" ]]; then
+                APP_NAME="$NEW_APP_NAME"
+                flyctl apps create "$APP_NAME" --org personal
+                print_success "App '$APP_NAME' created!"
+            else
+                exit 1
+            fi
+        fi
     fi
     
-    # Update fly.toml with app name
-    sed -i.bak "s/app = \"memebot-ai\"/app = \"$APP_NAME\"/" fly.toml
-    sed -i.bak "s/primary_region = \"fra\"/primary_region = \"$REGION\"/" fly.toml
+    # Update fly.toml with app name and region
+    print_status "Updating fly.toml configuration..."
     
-    print_success "App configuration updated"
+    # Create backup
+    cp fly.toml fly.toml.bak
+    
+    # Update app name and region
+    sed -i.tmp "s/app = \".*\"/app = \"$APP_NAME\"/" fly.toml
+    sed -i.tmp "s/primary_region = \".*\"/primary_region = \"$REGION\"/" fly.toml
+    
+    # Clean up temp files
+    rm -f fly.toml.tmp fly.toml.bak
+    
+    print_success "fly.toml updated with app: $APP_NAME, region: $REGION"
 }
 
 # Create volumes

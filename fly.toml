@@ -25,15 +25,15 @@ primary_region = "fra"
   app = "python main.py"
   watchdog = "python watchdog.py"
 
-[mounts]
+[[mounts]]
   source = "memebot_data"
   destination = "/app/data"
 
-[mounts]
+[[mounts]]
   source = "memebot_models"
   destination = "/app/models"
 
-[mounts]
+[[mounts]]
   source = "memebot_logs"
   destination = "/app/logs"
 
