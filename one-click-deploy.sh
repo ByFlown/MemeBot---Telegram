@@ -3,7 +3,66 @@
 # 🤖 MemeBot One-Click Deployment Script
 # Deploy to Fly.io without needing Python/pip locally
 
-set -e
+# Enhanced error handling
+set -euo pipefail  # Exit on error, undefined vars, pipe failures
+IFS=$'\n\t'       # Secure Internal Field Separator
+
+# Error handler function
+handle_error() {
+    local exit_code=$?
+    local line_number=$1
+    
+    echo ""
+    print_error "💥 DEPLOYMENT FAILED!"
+    echo ""
+    print_error "Error occurred on line $line_number (exit code: $exit_code)"
+    print_error "Last command: ${BASH_COMMAND}"
+    echo ""
+    
+    # Show some diagnostic information
+    print_status "🔍 Diagnostic Information:"
+    echo "  Script: $0"
+    echo "  Working directory: $(pwd)"
+    echo "  User: $(whoami)"
+    echo "  Shell: $SHELL"
+    echo "  Date: $(date)"
+    
+    # Check if flyctl is available
+    if command -v flyctl &> /dev/null; then
+        echo "  flyctl version: $(flyctl version 2>/dev/null || echo 'Unable to get version')"
+        echo "  flyctl auth: $(flyctl auth whoami 2>/dev/null || echo 'Not authenticated')"
+    else
+        echo "  flyctl: Not installed"
+    fi
+    
+    echo ""
+    print_error "Common solutions:"
+    echo "  1. Check your internet connection"
+    echo "  2. Ensure flyctl is installed: curl -L https://fly.io/install.sh | sh"
+    echo "  3. Login to fly.io: flyctl auth login"
+    echo "  4. Check if .env file exists and has correct format"
+    echo "  5. Verify all required environment variables are set"
+    echo ""
+    print_warning "Press any key to exit..."
+    read -n 1 -s
+    exit $exit_code
+}
+
+# Set error trap
+trap 'handle_error ${LINENO}' ERR
+
+# Also trap EXIT to prevent terminal from closing immediately
+cleanup_and_exit() {
+    local exit_code=$?
+    if [ $exit_code -ne 0 ]; then
+        echo ""
+        print_error "Script exited with error code: $exit_code"
+        print_warning "Press any key to close terminal..."
+        read -n 1 -s
+    fi
+    exit $exit_code
+}
+trap cleanup_and_exit EXIT
 
 echo "🚀 MemeBot One-Click Deployment to Fly.io"
 echo "========================================"
@@ -40,28 +99,60 @@ check_flyctl() {
     if ! command -v flyctl &> /dev/null; then
         print_warning "flyctl not found. Installing..."
         
+        # Create temp directory for installation
+        local temp_dir
+        temp_dir=$(mktemp -d 2>/dev/null || mktemp -d -t 'flyctl_install')
+        
         # Detect OS and install
-        if [[ "$OSTYPE" == "linux-gnu"* ]]; then
-            curl -L https://fly.io/install.sh | sh
-            export PATH="$HOME/.fly/bin:$PATH"
-        elif [[ "$OSTYPE" == "darwin"* ]]; then
-            if command -v brew &> /dev/null; then
-                brew install flyctl
+        if [[ "$OSTYPE" == "linux-gnu"* ]] || [[ "$OSTYPE" == "darwin"* ]]; then
+            print_status "Downloading flyctl installer..."
+            if curl -fsSL https://fly.io/install.sh -o "$temp_dir/install.sh"; then
+                print_status "Running installer..."
+                bash "$temp_dir/install.sh"
+                
+                # Add to PATH for this session
+                if [[ -d "$HOME/.fly/bin" ]]; then
+                    export PATH="$HOME/.fly/bin:$PATH"
+                fi
+                
+                # Verify installation
+                if ! command -v flyctl &> /dev/null; then
+                    print_error "Installation failed. Please install manually:"
+                    if [[ "$OSTYPE" == "darwin"* ]]; then
+                        print_error "brew install flyctl"
+                    fi
+                    print_error "Or visit: https://fly.io/docs/flyctl/install/"
+                    exit 1
+                fi
             else
-                curl -L https://fly.io/install.sh | sh
-                export PATH="$HOME/.fly/bin:$PATH"
+                print_error "Failed to download installer. Please check your internet connection."
+                print_error "Or install manually: https://fly.io/docs/flyctl/install/"
+                exit 1
             fi
-        elif [[ "$OSTYPE" == "msys" ]] || [[ "$OSTYPE" == "cygwin" ]]; then
-            print_error "Please install flyctl for Windows:"
+        elif [[ "$OSTYPE" == "msys" ]] || [[ "$OSTYPE" == "cygwin" ]] || [[ "$OSTYPE" == "win32" ]]; then
+            print_error "Windows detected. Please install flyctl manually:"
             print_error "Run in PowerShell: iwr https://fly.io/install.ps1 -useb | iex"
+            print_error "Or download from: https://github.com/superfly/flyctl/releases"
             exit 1
         else
             print_error "Unsupported OS: $OSTYPE"
+            print_error "Please install flyctl manually: https://fly.io/docs/flyctl/install/"
             exit 1
         fi
+        
+        # Cleanup
+        rm -rf "$temp_dir"
     fi
     
-    print_success "flyctl is available"
+    # Verify flyctl works
+    local flyctl_version
+    if flyctl_version=$(flyctl version 2>&1); then
+        print_success "flyctl is available: $flyctl_version"
+    else
+        print_error "flyctl is installed but not working properly"
+        print_error "Try reinstalling: curl -L https://fly.io/install.sh | sh"
+        exit 1
+    fi
 }
 
 # Check authentication
