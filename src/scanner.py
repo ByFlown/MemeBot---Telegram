@@ -171,35 +171,34 @@ class DexScreenerScanner:
         logger.debug(f"Volume data: {volume}")
         logger.debug(f"Liquidity data: {liquidity}")
         
-        # Calculate total transactions (m5 and h1 available in new API)
-        txns_5m = txns.get('m5', 0)
-        txns_1h = txns.get('h1', 0)
+        # Calculate total transactions (m5 and h1 available in new API) - safe extraction
+        def safe_float(value, default=0.0):
+            try:
+                if isinstance(value, dict):
+                    return default
+                return float(value) if value is not None else default
+            except (ValueError, TypeError):
+                return default
+        
+        def safe_int(value, default=0):
+            try:
+                if isinstance(value, dict):
+                    return default
+                return int(value) if value is not None else default
+            except (ValueError, TypeError):
+                return default
+
+        txns_5m = safe_int(txns.get('m5', 0))
+        txns_1h = safe_int(txns.get('h1', 0))
         
         # Extract all data with error handling
         try:
             symbol = base_token.get('symbol', 'UNKNOWN')
             address = base_token.get('address', '')
-            price_usd = float(pair.get('priceUsd', 0))
+            price_usd = safe_float(pair.get('priceUsd'))
             
             logger.debug(f"Basic extraction: symbol={symbol}, address={address[:10] if address else 'empty'}, price=${price_usd}")
             
-            # Safe extraction with type handling
-            def safe_float(value, default=0.0):
-                try:
-                    if isinstance(value, dict):
-                        return default
-                    return float(value) if value is not None else default
-                except (ValueError, TypeError):
-                    return default
-            
-            def safe_int(value, default=0):
-                try:
-                    if isinstance(value, dict):
-                        return default
-                    return int(value) if value is not None else default
-                except (ValueError, TypeError):
-                    return default
-
             extracted_data = {
                 'symbol': symbol,
                 'name': base_token.get('name', 'Unknown Token'),
@@ -208,9 +207,9 @@ class DexScreenerScanner:
                 'price_usd': price_usd,
                 'volume_24h': safe_float(volume.get('h24')),
                 'volume_1h': safe_float(volume.get('h1')),
-                'txns_24h': safe_int(txns_1h * 24) if txns_1h > 0 else 0,  # Estimate 24h from 1h
-                'txns_1h': safe_int(txns_1h),
-                'txns_5m': safe_int(txns_5m),
+                'txns_24h': safe_int(txns_1h * 24) if txns_1h > 0 else 0,  # Safe comparison now
+                'txns_1h': txns_1h,  # Already safe
+                'txns_5m': txns_5m,  # Already safe
                 'price_change_24h': safe_float(pair.get('priceChange', {}).get('h24')),
                 'price_change_1h': safe_float(pair.get('priceChange', {}).get('h1')),
                 'liquidity_usd': safe_float(liquidity.get('usd')),
