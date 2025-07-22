@@ -26,28 +26,35 @@ class DexScreenerScanner:
         try:
             session = await self.get_session()
             
-            # Multiple strategies to get Solana pairs from different DEXes
-            urls = [
-                f"https://api.dexscreener.com/latest/dex/search?q=SOL",  # Search for SOL pairs
-                f"https://api.dexscreener.com/latest/dex/search?q=raydium",  # Raydium DEX
-                f"https://api.dexscreener.com/latest/dex/search?q=orca",     # Orca DEX
-            ]
-            
+            # Use working DexScreener endpoints for Solana tokens
             all_pairs = []
             
-            for search_url in urls:
+            # Try direct search approaches that are known to work
+            search_queries = ["SOL", "USDC", "solana"]
+            
+            for query in search_queries:
                 try:
+                    search_url = f"https://api.dexscreener.com/latest/dex/search?q={query}"
+                    logger.debug(f"Searching DexScreener with query: {query}")
+                    
                     async with session.get(search_url) as search_response:
                         if search_response.status == 200:
                             search_data = await search_response.json()
                             pairs = search_data.get('pairs', [])
-                            # Filter for Solana chain
+                            logger.debug(f"Got {len(pairs)} pairs from query '{query}'")
+                            
+                            # Filter for Solana chain and add to collection
                             solana_pairs = [p for p in pairs if p.get('chainId') == 'solana']
                             all_pairs.extend(solana_pairs)
-                        await asyncio.sleep(0.1)  # Rate limiting
+                            logger.debug(f"Added {len(solana_pairs)} Solana pairs")
+                        else:
+                            logger.warning(f"DexScreener search failed for '{query}': {search_response.status}")
+                        
+                        await asyncio.sleep(0.2)  # Rate limiting
+                        
                 except Exception as e:
-                    logger.debug(f"Search URL {search_url} failed: {e}")
-                    continue"
+                    logger.error(f"Search query '{query}' failed: {e}")
+                    continue
             
             # Remove duplicates and use all collected pairs
             pairs = []
@@ -59,6 +66,22 @@ class DexScreenerScanner:
                     seen_addresses.add(pair_addr)
                     
             logger.info(f"Collected {len(pairs)} unique Solana pairs from search")
+            
+            # If no pairs found, try fallback method
+            if not pairs:
+                logger.warning("No pairs found from search, trying fallback method...")
+                try:
+                    # Try getting popular token pairs directly
+                    fallback_url = "https://api.dexscreener.com/latest/dex/tokens/So11111111111111111111111111111111111111112"  # SOL token
+                    async with session.get(fallback_url) as fallback_response:
+                        if fallback_response.status == 200:
+                            fallback_data = await fallback_response.json()
+                            pairs = fallback_data.get('pairs', [])[:50]  # Limit to first 50
+                            logger.info(f"Fallback method found {len(pairs)} SOL pairs")
+                        else:
+                            logger.error(f"Fallback method also failed: {fallback_response.status}")
+                except Exception as e:
+                    logger.error(f"Fallback method error: {e}")
             
             # Filter for new tokens (created in last 24 hours)
             new_tokens = []
