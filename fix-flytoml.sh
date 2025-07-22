@@ -70,6 +70,24 @@ for section in "env" "vm" "build" "http_service" "deploy"; do
     fi
 done
 
+# Issue 3: Check for conflicting process/service configuration
+if grep -q "^\[processes\]" fly.toml && grep -q "^\[\[services\]\]" fly.toml; then
+    print_warning "Found both [processes] and [[services]] sections"
+    print_status "This can cause validation errors. Fixing..."
+    
+    # Check if http_service exists
+    if grep -q "^\[http_service\]" fly.toml; then
+        print_status "Using [http_service] configuration, removing conflicting sections..."
+        
+        # Remove [processes] section and [[services]] sections
+        sed -i.tmp3 '/^\[processes\]/,/^$/d' fly.toml
+        sed -i.tmp3 '/^\[\[services\]\]/,/^$/d' fly.toml
+        rm -f fly.toml.tmp3
+        
+        print_success "Removed conflicting [processes] and [[services]] sections"
+    fi
+fi
+
 # Issue 3: Validate TOML syntax
 print_status "Validating TOML syntax..."
 
