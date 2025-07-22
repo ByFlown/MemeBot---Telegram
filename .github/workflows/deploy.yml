@@ -1,0 +1,138 @@
+name: Deploy MemeBot to Fly.io
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        default: 'production'
+        type: choice
+        options:
+          - production
+          - staging
+
+env:
+  FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+  FLY_APP_NAME: ${{ secrets.FLY_APP_NAME || 'memebot-ai' }}
+
+jobs:
+  deploy:
+    name: Deploy to Fly.io
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: 🏗 Checkout repository
+      uses: actions/checkout@v4
+      
+    - name: 🔧 Setup Fly.io CLI
+      uses: superfly/flyctl-actions/setup-flyctl@master
+      
+    - name: 📋 Create fly.toml from template
+      run: |
+        # Use environment-specific app name if staging
+        if [ "${{ github.event.inputs.environment }}" = "staging" ]; then
+          sed "s/app = \"memebot-ai\"/app = \"memebot-ai-staging\"/" fly.toml > fly-temp.toml
+          mv fly-temp.toml fly.toml
+        fi
+        
+    - name: 🗂 Create persistent volumes
+      run: |
+        echo "Creating persistent volumes..."
+        flyctl volumes list --app $FLY_APP_NAME || true
+        
+        # Create volumes if they don't exist
+        flyctl volumes create memebot_models --size 3 --app $FLY_APP_NAME --region fra || echo "Volume memebot_models might already exist"
+        flyctl volumes create memebot_logs --size 2 --app $FLY_APP_NAME --region fra || echo "Volume memebot_logs might already exist"
+        flyctl volumes create memebot_data --size 1 --app $FLY_APP_NAME --region fra || echo "Volume memebot_data might already exist"
+        
+    - name: 🔐 Set application secrets
+      run: |
+        echo "Setting up secrets..."
+        
+        # Core bot configuration
+        flyctl secrets set \
+          TELEGRAM_TOKEN="${{ secrets.TELEGRAM_TOKEN }}" \
+          OWNER_ID="${{ secrets.OWNER_ID }}" \
+          --app $FLY_APP_NAME
+        
+        # Trading configuration
+        if [ -n "${{ secrets.SOLANA_PRIVATE_KEY }}" ]; then
+          flyctl secrets set SOLANA_PRIVATE_KEY="${{ secrets.SOLANA_PRIVATE_KEY }}" --app $FLY_APP_NAME
+        fi
+        
+        if [ -n "${{ secrets.REAL_TRADING_ENABLED }}" ]; then
+          flyctl secrets set REAL_TRADING_ENABLED="${{ secrets.REAL_TRADING_ENABLED }}" --app $FLY_APP_NAME
+        fi
+        
+        # API Keys (optional)
+        if [ -n "${{ secrets.BIRDEYE_API_KEY }}" ]; then
+          flyctl secrets set BIRDEYE_API_KEY="${{ secrets.BIRDEYE_API_KEY }}" --app $FLY_APP_NAME
+        fi
+        
+        if [ -n "${{ secrets.HELIUS_API_KEY }}" ]; then
+          flyctl secrets set HELIUS_API_KEY="${{ secrets.HELIUS_API_KEY }}" --app $FLY_APP_NAME
+        fi
+        
+        # Environment-specific settings
+        flyctl secrets set \
+          ENVIRONMENT="${{ github.event.inputs.environment || 'production' }}" \
+          DEPLOYMENT_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+          GIT_COMMIT="${{ github.sha }}" \
+          --app $FLY_APP_NAME
+        
+    - name: 🚀 Deploy to Fly.io
+      run: |
+        echo "Deploying MemeBot to Fly.io..."
+        flyctl deploy --app $FLY_APP_NAME --remote-only
+        
+    - name: 🔍 Health check
+      run: |
+        echo "Waiting for deployment to be ready..."
+        sleep 30
+        
+        # Get app URL
+        APP_URL=$(flyctl info --app $FLY_APP_NAME --json | jq -r '.Hostname' | sed 's/^/https:\/\//')
+        echo "App URL: $APP_URL"
+        
+        # Health check with retry
+        for i in {1..5}; do
+          echo "Health check attempt $i/5..."
+          if curl -f "$APP_URL/health" > /dev/null 2>&1; then
+            echo "✅ Health check passed!"
+            break
+          else
+            if [ $i -eq 5 ]; then
+              echo "❌ Health check failed after 5 attempts"
+              exit 1
+            fi
+            sleep 10
+          fi
+        done
+        
+    - name: 📊 Post-deployment status
+      run: |
+        echo "📊 Deployment Status:"
+        flyctl status --app $FLY_APP_NAME
+        
+        echo "📝 Recent logs:"
+        flyctl logs --app $FLY_APP_NAME --lines=20
+        
+        echo "🔗 App URL: https://$(flyctl info --app $FLY_APP_NAME --json | jq -r '.Hostname')"
+        
+    - name: 📢 Notify on success
+      if: success()
+      run: |
+        echo "🎉 MemeBot successfully deployed to Fly.io!"
+        echo "Environment: ${{ github.event.inputs.environment || 'production' }}"
+        echo "Commit: ${{ github.sha }}"
+        echo "App: $FLY_APP_NAME"
+        
+    - name: 📢 Notify on failure  
+      if: failure()
+      run: |
+        echo "❌ Deployment failed!"
+        echo "Check the logs above for details."
+        flyctl logs --app $FLY_APP_NAME --lines=50

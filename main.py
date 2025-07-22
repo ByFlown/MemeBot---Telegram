@@ -21,6 +21,7 @@ from src.wallet_manager import WalletManager
 from src.backtester import Backtester
 from src.logger import TradingLogger
 from src.performance_monitor import PerformanceMonitor
+from src.web_interface import WebInterface
 
 # Load environment variables
 load_dotenv()
@@ -41,6 +42,7 @@ class MemeBot:
         self.backtester = Backtester()
         self.trading_logger = TradingLogger()
         self.performance_monitor = PerformanceMonitor()
+        self.web_interface = WebInterface(self)
         
         self.real_mode = False
         self.scanning_active = True
@@ -363,19 +365,10 @@ class MemeBot:
                 'timestamp': datetime.now().isoformat()
             }, status=500)
     
-    async def setup_health_server(self):
-        """Setup health check server for Fly.io"""
-        app = web.Application()
-        app.router.add_get('/health', self.health_check)
-        app.router.add_get('/', self.health_check)  # Root endpoint
-        
-        # Start server
+    async def setup_web_interface(self):
+        """Setup web interface server"""
         port = int(os.getenv('PORT', 8080))
-        runner = web.AppRunner(app)
-        await runner.setup()
-        site = web.TCPSite(runner, '0.0.0.0', port)
-        await site.start()
-        logger.info(f"Health check server started on port {port}")
+        await self.web_interface.start_server(port)
 
 async def main():
     """Main function"""
@@ -401,8 +394,8 @@ async def main():
     # Setup scheduler
     bot.setup_scheduler()
     
-    # Setup health check server for Fly.io
-    await bot.setup_health_server()
+    # Setup web interface
+    await bot.setup_web_interface()
     
     # Start trading loop
     trading_task = asyncio.create_task(bot.scan_and_trade())
