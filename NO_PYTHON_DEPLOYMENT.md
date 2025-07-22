@@ -4,15 +4,21 @@ Deploy MemeBot to Fly.io **without installing Python, pip, or any local dependen
 
 ## 🎯 Quick Start (One-Click Deployment)
 
-### Option 1: Automated Script
+### Option 1: One-Click Script (Smart Config Detection)
 ```bash
-# Download and run (Linux/Mac)
-curl -sSL https://raw.githubusercontent.com/your-repo/MemeBot/main/one-click-deploy.sh | bash
-
-# Or clone and run
+# Method A: With configuration setup
 git clone https://github.com/your-repo/MemeBot.git
 cd MemeBot
-./one-click-deploy.sh
+./setup-env.sh        # Configure once
+./one-click-deploy.sh  # Deploy (uses saved config)
+
+# Method B: Direct deployment (auto-detects .env)
+./one-click-deploy.sh  # Prompts only for missing values
+
+# Method C: With environment variables
+export TELEGRAM_TOKEN="your_token"
+export OWNER_ID="your_user_id" 
+./one-click-deploy.sh  # No prompts needed!
 ```
 
 ### Option 2: GitHub Actions (Recommended)

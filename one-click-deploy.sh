@@ -77,36 +77,100 @@ check_auth() {
     print_success "Authenticated with Fly.io"
 }
 
-# Collect required information
+# Check for existing environment variables or config files
+load_existing_config() {
+    print_status "Checking for existing configuration..."
+    
+    # Try to load from .env file
+    if [[ -f ".env" ]]; then
+        print_success "Found .env file, loading configuration..."
+        source .env
+        LOADED_FROM_ENV=true
+    else
+        LOADED_FROM_ENV=false
+    fi
+    
+    # Check for environment variables (from GitHub Actions or manual export)
+    if [[ -n "$TELEGRAM_TOKEN" && -n "$OWNER_ID" ]]; then
+        print_success "Found configuration in environment variables"
+        LOADED_FROM_ENV=true
+    fi
+    
+    # Set defaults from environment if available
+    APP_NAME=${FLY_APP_NAME:-${APP_NAME:-memebot-ai}}
+    REGION=${FLY_REGION:-${REGION:-fra}}
+    TELEGRAM_TOKEN=${TELEGRAM_TOKEN:-}
+    OWNER_ID=${OWNER_ID:-}
+    SOLANA_PRIVATE_KEY=${SOLANA_PRIVATE_KEY:-}
+    REAL_TRADING_ENABLED=${REAL_TRADING_ENABLED:-false}
+    WEB_ADMIN_TOKEN=${WEB_ADMIN_TOKEN:-admin123}
+    BIRDEYE_API_KEY=${BIRDEYE_API_KEY:-}
+    HELIUS_API_KEY=${HELIUS_API_KEY:-}
+    DEXSCREENER_API_KEY=${DEXSCREENER_API_KEY:-}
+}
+
+# Collect required information (with smart defaults)
 collect_info() {
     print_status "Collecting deployment information..."
     echo ""
     
-    # App name
-    read -p "Enter app name (default: memebot-ai): " APP_NAME
-    APP_NAME=${APP_NAME:-memebot-ai}
+    # Show current config if loaded
+    if [[ "$LOADED_FROM_ENV" == "true" ]]; then
+        print_success "Using existing configuration:"
+        echo "  App Name: $APP_NAME"
+        echo "  Region: $REGION"
+        echo "  Telegram Token: ${TELEGRAM_TOKEN:0:10}..." 
+        echo "  Owner ID: $OWNER_ID"
+        echo "  Real Trading: $REAL_TRADING_ENABLED"
+        echo ""
+        
+        read -p "Use this configuration? [Y/n]: " USE_EXISTING
+        USE_EXISTING=${USE_EXISTING:-y}
+        
+        if [[ "$USE_EXISTING" == "y" || "$USE_EXISTING" == "Y" ]]; then
+            # Validate required fields
+            if [[ -z "$TELEGRAM_TOKEN" || -z "$OWNER_ID" ]]; then
+                print_warning "Missing required configuration, will prompt for missing values"
+            else
+                print_success "Using existing configuration"
+                return
+            fi
+        fi
+    fi
     
-    # Region
-    echo "Available regions:"
-    echo "  fra - Frankfurt, Germany"
-    echo "  iad - Washington D.C., USA"
-    echo "  sin - Singapore"
-    echo "  syd - Sydney, Australia"
-    read -p "Enter region (default: fra): " REGION
-    REGION=${REGION:-fra}
+    # App name
+    if [[ -z "$APP_NAME" ]]; then
+        read -p "Enter app name (default: memebot-ai): " INPUT_APP_NAME
+        APP_NAME=${INPUT_APP_NAME:-memebot-ai}
+    fi
+    
+    # Region  
+    if [[ -z "$REGION" ]]; then
+        echo "Available regions:"
+        echo "  fra - Frankfurt, Germany"
+        echo "  iad - Washington D.C., USA" 
+        echo "  sin - Singapore"
+        echo "  syd - Sydney, Australia"
+        read -p "Enter region (default: fra): " INPUT_REGION
+        REGION=${INPUT_REGION:-fra}
+    fi
     
     # Telegram configuration
-    echo ""
-    print_status "Telegram Bot Configuration"
-    echo "Create a bot at: https://t.me/BotFather"
-    read -p "Enter your Telegram Bot Token: " TELEGRAM_TOKEN
+    if [[ -z "$TELEGRAM_TOKEN" ]]; then
+        echo ""
+        print_status "Telegram Bot Configuration"
+        echo "Create a bot at: https://t.me/BotFather"
+        read -p "Enter your Telegram Bot Token: " TELEGRAM_TOKEN
+    fi
     
     if [[ -z "$TELEGRAM_TOKEN" ]]; then
         print_error "Telegram token is required!"
         exit 1
     fi
     
-    read -p "Enter your Telegram User ID: " OWNER_ID
+    if [[ -z "$OWNER_ID" ]]; then
+        read -p "Enter your Telegram User ID: " OWNER_ID
+    fi
     
     if [[ -z "$OWNER_ID" ]]; then
         print_error "Owner ID is required!"
@@ -114,24 +178,30 @@ collect_info() {
     fi
     
     # Trading configuration
-    echo ""
-    print_status "Trading Configuration"
-    read -p "Enable real trading? (DANGEROUS - start with 'n') [y/N]: " ENABLE_REAL_TRADING
-    ENABLE_REAL_TRADING=${ENABLE_REAL_TRADING:-n}
-    
-    if [[ "$ENABLE_REAL_TRADING" == "y" || "$ENABLE_REAL_TRADING" == "Y" ]]; then
-        print_warning "Real trading enabled! Make sure you understand the risks."
-        read -p "Enter Solana private key (Base58): " SOLANA_PRIVATE_KEY
-        REAL_TRADING_ENABLED="true"
-    else
-        print_success "Paper trading mode (safe for testing)"
-        SOLANA_PRIVATE_KEY=""
-        REAL_TRADING_ENABLED="false"
+    if [[ -z "$REAL_TRADING_ENABLED" || "$REAL_TRADING_ENABLED" == "false" ]]; then
+        echo ""
+        print_status "Trading Configuration"
+        read -p "Enable real trading? (DANGEROUS - start with 'n') [y/N]: " ENABLE_REAL_TRADING
+        ENABLE_REAL_TRADING=${ENABLE_REAL_TRADING:-n}
+        
+        if [[ "$ENABLE_REAL_TRADING" == "y" || "$ENABLE_REAL_TRADING" == "Y" ]]; then
+            print_warning "Real trading enabled! Make sure you understand the risks."
+            if [[ -z "$SOLANA_PRIVATE_KEY" ]]; then
+                read -p "Enter Solana private key (Base58): " SOLANA_PRIVATE_KEY
+            fi
+            REAL_TRADING_ENABLED="true"
+        else
+            print_success "Paper trading mode (safe for testing)"
+            SOLANA_PRIVATE_KEY=""
+            REAL_TRADING_ENABLED="false"
+        fi
     fi
     
     # Web interface
-    read -p "Enter web admin token (for dashboard access): " WEB_ADMIN_TOKEN
-    WEB_ADMIN_TOKEN=${WEB_ADMIN_TOKEN:-admin123}
+    if [[ "$WEB_ADMIN_TOKEN" == "admin123" ]]; then
+        read -p "Enter web admin token (default: admin123): " INPUT_WEB_TOKEN
+        WEB_ADMIN_TOKEN=${INPUT_WEB_TOKEN:-admin123}
+    fi
     
     echo ""
     print_success "Configuration collected"
@@ -185,6 +255,18 @@ set_secrets() {
     # Optional secrets
     if [[ -n "$SOLANA_PRIVATE_KEY" ]]; then
         flyctl secrets set SOLANA_PRIVATE_KEY="$SOLANA_PRIVATE_KEY" --app "$APP_NAME"
+    fi
+    
+    if [[ -n "$BIRDEYE_API_KEY" ]]; then
+        flyctl secrets set BIRDEYE_API_KEY="$BIRDEYE_API_KEY" --app "$APP_NAME"
+    fi
+    
+    if [[ -n "$HELIUS_API_KEY" ]]; then
+        flyctl secrets set HELIUS_API_KEY="$HELIUS_API_KEY" --app "$APP_NAME"
+    fi
+    
+    if [[ -n "$DEXSCREENER_API_KEY" ]]; then
+        flyctl secrets set DEXSCREENER_API_KEY="$DEXSCREENER_API_KEY" --app "$APP_NAME"
     fi
     
     # Deployment info
@@ -265,6 +347,7 @@ main() {
     
     check_flyctl
     check_auth
+    load_existing_config
     collect_info
     setup_app
     create_volumes
