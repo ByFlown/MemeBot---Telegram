@@ -300,8 +300,7 @@ class WebInterface:
         self.app.router.add_post('/api/emergency-stop', self.api_emergency_stop)
         self.app.router.add_post('/api/run-backtest', self.api_run_backtest)
         
-        # Static content (if needed)
-        self.app.router.add_static('/static/', path='static', name='static')
+        # Static content not needed - using inline CSS/JS and CDN resources
     
     def check_auth(self, request):
         """Check if user is authenticated"""
