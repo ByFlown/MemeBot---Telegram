@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import time
 import threading
+from aiohttp import web, ClientSession
 
 from config import TELEGRAM_TOKEN, OWNER_ID
 from src.scanner import DexScreenerScanner
@@ -339,6 +340,42 @@ class MemeBot:
         )
         
         self.scheduler.start()
+    
+    async def health_check(self, request):
+        """Health check endpoint for monitoring"""
+        try:
+            # Check if bot is responsive
+            status = {
+                'status': 'healthy',
+                'timestamp': datetime.now().isoformat(),
+                'uptime': str(datetime.now() - self.start_time) if hasattr(self, 'start_time') else 'unknown',
+                'real_mode': self.real_mode,
+                'scanning_active': self.scanning_active,
+                'total_trades': self.total_trades,
+                'successful_trades': self.successful_trades,
+                'scan_interval': self.scan_interval
+            }
+            return web.json_response(status)
+        except Exception as e:
+            return web.json_response({
+                'status': 'unhealthy',
+                'error': str(e),
+                'timestamp': datetime.now().isoformat()
+            }, status=500)
+    
+    async def setup_health_server(self):
+        """Setup health check server for Fly.io"""
+        app = web.Application()
+        app.router.add_get('/health', self.health_check)
+        app.router.add_get('/', self.health_check)  # Root endpoint
+        
+        # Start server
+        port = int(os.getenv('PORT', 8080))
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, '0.0.0.0', port)
+        await site.start()
+        logger.info(f"Health check server started on port {port}")
 
 async def main():
     """Main function"""
@@ -363,6 +400,9 @@ async def main():
     
     # Setup scheduler
     bot.setup_scheduler()
+    
+    # Setup health check server for Fly.io
+    await bot.setup_health_server()
     
     # Start trading loop
     trading_task = asyncio.create_task(bot.scan_and_trade())
