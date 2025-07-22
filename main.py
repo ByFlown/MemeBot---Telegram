@@ -5,7 +5,7 @@ import json
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 import numpy as np
-from telegram import Update
+from telegram import Update, BotCommand
 from telegram.ext import Application, CommandHandler, ContextTypes
 from dotenv import load_dotenv
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -55,26 +55,31 @@ class MemeBot:
         
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Start command handler"""
-        if update.effective_user.id != OWNER_ID:
-            await update.message.reply_text("🚫 Unauthorized access!")
-            return
-            
-        await update.message.reply_text(
-            "🤖 **MemeBot AI Trading Bot**\n\n"
-            "Available commands:\n"
-            "/start - Show this menu\n"
-            "/status - Bot status and stats\n"
-            "/realmode on|off - Toggle real trading\n"
-            "/scan on|off - Toggle scanning\n"
-            "/setscan <minutes> - Set scan interval\n"
-            "/wallet - Wallet information\n"
-            "/top5 - Top 5 recent opportunities\n"
-            "/performance - Performance dashboard\n"
-            "/backtest - Run backtest\n"
-            "/logs - Recent trading logs\n"
-            "/alert on|off - Toggle alerts\n"
-            "/dump - Emergency stop all positions"
-        )
+        try:
+            if update.effective_user.id != OWNER_ID:
+                await update.message.reply_text("🚫 Unauthorized access!")
+                logger.warning(f"Unauthorized access attempt from user {update.effective_user.id}")
+                return
+                
+            await update.message.reply_text(
+                "🤖 **MemeBot AI Trading Bot**\n\n"
+                "Available commands:\n"
+                "/start - Show this menu\n"
+                "/status - Bot status and stats\n"
+                "/realmode on|off - Toggle real trading\n"
+                "/scan on|off - Toggle scanning\n"
+                "/setscan <minutes> - Set scan interval\n"
+                "/wallet - Wallet information\n"
+                "/top5 - Top 5 recent opportunities\n"
+                "/performance - Performance dashboard\n"
+                "/backtest - Run backtest\n"
+                "/logs - Recent trading logs\n"
+                "/dump - Emergency stop all positions",
+                parse_mode='Markdown'
+            )
+        except Exception as e:
+            logger.error(f"Error in start_command: {e}")
+            await update.message.reply_text("❌ Error processing command. Please try again.")
     
     async def status_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Status command handler"""
@@ -369,50 +374,101 @@ class MemeBot:
         """Setup web interface server"""
         port = int(os.getenv('PORT', 8080))
         await self.web_interface.start_server(port)
+    
+    async def setup_bot_commands(self, application):
+        """Setup bot command menu"""
+        try:
+            commands = [
+                BotCommand("start", "Show bot menu and commands"),
+                BotCommand("status", "Show bot status and statistics"),
+                BotCommand("realmode", "Toggle real trading mode on/off"),
+                BotCommand("scan", "Toggle token scanning on/off"),
+                BotCommand("setscan", "Set scanning interval in minutes"),
+                BotCommand("wallet", "Show wallet information"),
+                BotCommand("top5", "Show top 5 recent opportunities"),
+                BotCommand("performance", "Show performance dashboard"),
+                BotCommand("backtest", "Run backtesting analysis"),
+                BotCommand("logs", "Show recent trading logs"),
+                BotCommand("dump", "Emergency stop - close all positions")
+            ]
+            
+            await application.bot.set_my_commands(commands)
+            logger.info("✅ Bot commands registered successfully")
+            
+        except Exception as e:
+            logger.error(f"Error setting up bot commands: {e}")
 
 async def main():
     """Main function"""
-    bot = MemeBot()
-    bot.start_time = datetime.now()
-    
-    # Initialize Telegram bot
-    application = Application.builder().token(TELEGRAM_TOKEN).build()
-    
-    # Add command handlers
-    application.add_handler(CommandHandler("start", bot.start_command))
-    application.add_handler(CommandHandler("status", bot.status_command))
-    application.add_handler(CommandHandler("realmode", bot.realmode_command))
-    application.add_handler(CommandHandler("scan", bot.scan_command))
-    application.add_handler(CommandHandler("setscan", bot.setscan_command))
-    application.add_handler(CommandHandler("wallet", bot.wallet_command))
-    application.add_handler(CommandHandler("top5", bot.top5_command))
-    application.add_handler(CommandHandler("performance", bot.performance_command))
-    application.add_handler(CommandHandler("backtest", bot.backtest_command))
-    application.add_handler(CommandHandler("logs", bot.logs_command))
-    application.add_handler(CommandHandler("dump", bot.dump_command))
-    
-    # Setup scheduler
-    bot.setup_scheduler()
-    
-    # Setup web interface
-    await bot.setup_web_interface()
-    
-    # Start trading loop
-    trading_task = asyncio.create_task(bot.scan_and_trade())
-    
-    # Start Telegram bot
-    await application.initialize()
-    await application.start()
-    await application.updater.start_polling()
-    
-    logger.info("🤖 MemeBot is running!")
-    
     try:
-        await trading_task
-    except KeyboardInterrupt:
-        logger.info("🛑 Bot shutting down...")
-    finally:
-        await application.stop()
+        # Validate configuration
+        if TELEGRAM_TOKEN == 'DEIN_TELEGRAM_BOT_TOKEN':
+            logger.error("❌ TELEGRAM_TOKEN not configured! Please set your bot token.")
+            print("\n🔧 Configuration Error:")
+            print("Please set your TELEGRAM_TOKEN in environment variables or .env file")
+            print("Get your bot token from @BotFather on Telegram")
+            return
+        
+        if OWNER_ID == 123456789:
+            logger.warning("⚠️ OWNER_ID not configured! Using default value.")
+            print("\n⚠️ Configuration Warning:")
+            print("Please set your OWNER_ID (your Telegram user ID) in environment variables")
+            print("Send a message to @userinfobot to get your Telegram user ID")
+        
+        bot = MemeBot()
+        bot.start_time = datetime.now()
+        
+        logger.info("🚀 Initializing MemeBot...")
+        
+        # Initialize Telegram bot
+        application = Application.builder().token(TELEGRAM_TOKEN).build()
+        
+        # Add command handlers
+        application.add_handler(CommandHandler("start", bot.start_command))
+        application.add_handler(CommandHandler("status", bot.status_command))
+        application.add_handler(CommandHandler("realmode", bot.realmode_command))
+        application.add_handler(CommandHandler("scan", bot.scan_command))
+        application.add_handler(CommandHandler("setscan", bot.setscan_command))
+        application.add_handler(CommandHandler("wallet", bot.wallet_command))
+        application.add_handler(CommandHandler("top5", bot.top5_command))
+        application.add_handler(CommandHandler("performance", bot.performance_command))
+        application.add_handler(CommandHandler("backtest", bot.backtest_command))
+        application.add_handler(CommandHandler("logs", bot.logs_command))
+        application.add_handler(CommandHandler("dump", bot.dump_command))
+        
+        # Setup scheduler
+        bot.setup_scheduler()
+        
+        # Setup web interface
+        await bot.setup_web_interface()
+        
+        # Start Telegram bot
+        await application.initialize()
+        await application.start()
+        
+        # Register bot commands for the command menu
+        await bot.setup_bot_commands(application)
+        
+        # Start polling
+        await application.updater.start_polling()
+        
+        logger.info("✅ MemeBot Telegram bot is running!")
+        logger.info(f"📱 Bot username: @{application.bot.username}")
+        
+        # Start trading loop
+        trading_task = asyncio.create_task(bot.scan_and_trade())
+        
+        try:
+            await trading_task
+        except KeyboardInterrupt:
+            logger.info("🛑 Bot shutting down...")
+        finally:
+            await application.stop()
+            
+    except Exception as e:
+        logger.error(f"💥 Critical error in main(): {e}")
+        print(f"\n💥 Bot crashed with error: {e}")
+        print("Check your configuration and try again.")
 
 if __name__ == "__main__":
     print("🚀 Starting MemeBot AI Trading Bot...")
