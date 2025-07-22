@@ -7,9 +7,6 @@ from solders.keypair import Keypair
 from solders.pubkey import Pubkey
 from solders.transaction import Transaction
 from solders.system_program import TransferParams, transfer
-from spl.token.constants import TOKEN_PROGRAM_ID
-from spl.token.async_client import AsyncToken
-from spl.token.instructions import get_associated_token_address
 import aiohttp
 import json
 import os
@@ -121,18 +118,21 @@ class WalletManager:
             client = await self.get_rpc_client()
             
             try:
-                token_mint = Pubkey.from_string(token_address)
-                associated_token_account = get_associated_token_address(
-                    self.keypair.pubkey(), token_mint
+                # Get token accounts by owner (simplified approach)
+                token_accounts = await client.get_token_accounts_by_owner(
+                    self.keypair.pubkey(),
+                    {"mint": Pubkey.from_string(token_address)}
                 )
                 
-                # Get token account balance
-                balance_response = await client.get_token_account_balance(
-                    associated_token_account
-                )
-                
-                if balance_response.value:
-                    return float(balance_response.value.amount)
+                if token_accounts.value:
+                    # Get balance from first matching token account
+                    token_account = token_accounts.value[0]
+                    balance_response = await client.get_token_account_balance(
+                        token_account.pubkey
+                    )
+                    
+                    if balance_response.value:
+                        return float(balance_response.value.amount)
                 
                 return 0.0
                 
@@ -159,9 +159,10 @@ class WalletManager:
             # Get token accounts
             client = await self.get_rpc_client()
             try:
+                # Get all token accounts owned by this wallet
                 token_accounts = await client.get_token_accounts_by_owner(
                     self.keypair.pubkey(),
-                    {"programId": TOKEN_PROGRAM_ID}
+                    {"programId": Pubkey.from_string("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")}  # SPL Token Program ID
                 )
                 
                 token_count = len(token_accounts.value) if token_accounts.value else 0
