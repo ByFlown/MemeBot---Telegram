@@ -28,11 +28,11 @@ RUN pip install --no-cache-dir --upgrade pip && \
 # Copy application code
 COPY . .
 
-# Create necessary directories
-RUN mkdir -p models logs data
+# Create necessary directories (will be replaced by symlinks in production)
+RUN mkdir -p models logs data storage
 
 # Make scripts executable
-RUN chmod +x watchdog.py install.py
+RUN chmod +x watchdog.py install.py setup-storage.py test-deployment.py
 
 # Create a non-root user for security
 RUN useradd --create-home --shell /bin/bash memebot && \
@@ -43,5 +43,5 @@ USER memebot
 HEALTHCHECK --interval=60s --timeout=10s --start-period=30s --retries=3 \
     CMD python -c "import requests; requests.get('http://localhost:8080/health', timeout=5)" || exit 1
 
-# Default command - use test script first for debugging
-CMD ["python", "test-deployment.py"]
+# Default command (can be overridden by fly.toml processes)
+CMD ["python", "main.py"]
