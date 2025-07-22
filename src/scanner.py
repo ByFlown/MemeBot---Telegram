@@ -4,6 +4,7 @@ import logging
 from typing import List, Dict, Optional
 from datetime import datetime, timedelta
 import json
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -114,15 +115,29 @@ class DexScreenerScanner:
                     token_data['volume_score'] = self._calculate_volume_score(token_data)
                     token_data['liquidity_score'] = self._calculate_liquidity_score(token_data)
                     
+                    # Debug logging
+                    logger.debug(f"Processing token: {token_data.get('symbol', 'UNKNOWN')} - Address: {token_data.get('address', 'N/A')}")
+                    
                     # Only apply minimal validation
                     if self._is_valid_token(token_data):
                         all_tokens.append(token_data)
+                        logger.debug(f"✅ Added token: {token_data['symbol']}")
+                    else:
+                        logger.debug(f"❌ Rejected token: {token_data.get('symbol', 'UNKNOWN')} - Address: {token_data.get('address', 'missing')}, Price: {token_data.get('price_usd', 'missing')}")
                 
                 except (ValueError, TypeError) as e:
                     logger.debug(f"Error parsing pair data: {e}")
                     continue
             
             logger.info(f"Found {len(all_tokens)} tokens from DexScreener (no pre-filtering)")
+            
+            # Add detailed logging if we found pairs but no valid tokens
+            if len(pairs) > 0 and len(all_tokens) == 0:
+                logger.warning(f"Found {len(pairs)} pairs but 0 valid tokens - validation too strict?")
+                # Log first pair details for debugging
+                if pairs:
+                    sample_pair = pairs[0]
+                    logger.warning(f"Sample pair data: {json.dumps(sample_pair, indent=2)[:500]}...")
             
             # Sort by recency and activity for AI to learn from fresh data first
             return sorted(all_tokens, key=lambda x: (x['age_hours'] * -1, x['volume_24h']), reverse=False)
@@ -165,27 +180,30 @@ class DexScreenerScanner:
         }
     
     def _is_valid_token(self, token: Dict) -> bool:
-        """Minimal validation - let AI learn from ALL data"""
-        # Only skip tokens with completely missing critical data
-        if not token.get('address') or not token.get('symbol'):
+        """Ultra-minimal validation - let AI learn from ALL data"""
+        # Only skip tokens with completely missing symbol (address can be empty for testing)
+        symbol = token.get('symbol', '').strip()
+        if not symbol or symbol == 'UNKNOWN':
+            logger.debug(f"Rejected: missing/invalid symbol '{symbol}'")
             return False
         
-        # Only skip completely broken price data
+        # Allow empty addresses for learning (some pairs might have partial data)
+        address = token.get('address', '').strip()
+        if not address:
+            logger.debug(f"Token {symbol} has no address - allowing for learning")
+            # Don't reject, let AI learn from this too
+        
+        # Allow any price including 0 (some new tokens start at 0)
         try:
             price = float(token.get('price_usd', 0))
-            if price < 0:  # Negative prices are invalid
+            if price < 0:  # Only reject negative prices
+                logger.debug(f"Rejected: negative price {price}")
                 return False
         except (ValueError, TypeError):
+            logger.debug(f"Rejected: invalid price data")
             return False
         
-        # That's it! Let the AI model learn from everything else:
-        # - Low volume tokens
-        # - New tokens with few transactions
-        # - Low liquidity tokens  
-        # - Suspicious looking symbols
-        # - High risk tokens
-        # The model will learn which patterns lead to good vs bad trades
-        
+        logger.debug(f"✅ Accepted token: {symbol} (${price})")
         return True
     
     def _calculate_risk_score(self, token: Dict) -> float:

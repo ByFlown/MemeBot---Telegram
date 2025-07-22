@@ -26,11 +26,14 @@ from src.web_interface import WebInterface
 # Load environment variables
 load_dotenv()
 
-# Setup logging
+# Setup logging with debug for scanner
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
+
+# Enable debug for scanner specifically  
+logging.getLogger('src.scanner').setLevel(logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 class MemeBot:
