@@ -183,24 +183,41 @@ class DexScreenerScanner:
             
             logger.debug(f"Basic extraction: symbol={symbol}, address={address[:10] if address else 'empty'}, price=${price_usd}")
             
+            # Safe extraction with type handling
+            def safe_float(value, default=0.0):
+                try:
+                    if isinstance(value, dict):
+                        return default
+                    return float(value) if value is not None else default
+                except (ValueError, TypeError):
+                    return default
+            
+            def safe_int(value, default=0):
+                try:
+                    if isinstance(value, dict):
+                        return default
+                    return int(value) if value is not None else default
+                except (ValueError, TypeError):
+                    return default
+
             extracted_data = {
                 'symbol': symbol,
                 'name': base_token.get('name', 'Unknown Token'),
                 'address': address,
-                'price': float(pair.get('priceNative', 0)),
+                'price': safe_float(pair.get('priceNative')),
                 'price_usd': price_usd,
-                'volume_24h': float(volume.get('h24', 0)),
-                'volume_1h': float(volume.get('h1', 0)),
-                'txns_24h': int(txns_1h * 24) if txns_1h > 0 else 0,  # Estimate 24h from 1h
-                'txns_1h': int(txns_1h),
-                'txns_5m': int(txns_5m),
-                'price_change_24h': float(pair.get('priceChange', {}).get('h24', 0)),
-                'price_change_1h': float(pair.get('priceChange', {}).get('h1', 0)),
-                'liquidity_usd': float(liquidity.get('usd', 0)),
-                'market_cap': float(pair.get('fdv', 0)),  # Use fdv (fully diluted valuation)
+                'volume_24h': safe_float(volume.get('h24')),
+                'volume_1h': safe_float(volume.get('h1')),
+                'txns_24h': safe_int(txns_1h * 24) if txns_1h > 0 else 0,  # Estimate 24h from 1h
+                'txns_1h': safe_int(txns_1h),
+                'txns_5m': safe_int(txns_5m),
+                'price_change_24h': safe_float(pair.get('priceChange', {}).get('h24')),
+                'price_change_1h': safe_float(pair.get('priceChange', {}).get('h1')),
+                'liquidity_usd': safe_float(liquidity.get('usd')),
+                'market_cap': safe_float(pair.get('fdv')),  # Use fdv (fully diluted valuation)
                 'dex': pair.get('dexId', ''),
                 'pair_address': pair.get('pairAddress', ''),
-                'created_at': pair.get('pairCreatedAt', 0),
+                'created_at': safe_int(pair.get('pairCreatedAt')),
                 'chain_id': pair.get('chainId', 'solana'),
                 'source': 'dexscreener'
             }
@@ -264,26 +281,40 @@ class DexScreenerScanner:
         elif age_hours < 24:
             risk_score += 1.0  # New = somewhat risky
         
-        # Volume-based risk  
-        volume_24h = token.get('volume_24h', 0)
-        if volume_24h < 100:
-            risk_score += 2.0  # Very low volume
-        elif volume_24h < 1000:
-            risk_score += 1.0  # Low volume
+        # Volume-based risk (handle dict/string values)
+        try:
+            volume_24h = float(token.get('volume_24h', 0)) if not isinstance(token.get('volume_24h', 0), dict) else 0
+            if volume_24h < 100:
+                risk_score += 2.0  # Very low volume
+            elif volume_24h < 1000:
+                risk_score += 1.0  # Low volume
+        except (ValueError, TypeError):
+            risk_score += 1.0  # Unknown volume = some risk
         
-        # Liquidity-based risk
-        liquidity_usd = token.get('liquidity_usd', 0)
-        if liquidity_usd < 1000:
-            risk_score += 2.0  # Very low liquidity
-        elif liquidity_usd < 5000:
-            risk_score += 1.0  # Low liquidity
+        # Liquidity-based risk (handle dict/string values)
+        try:
+            liquidity_usd = float(token.get('liquidity_usd', 0)) if not isinstance(token.get('liquidity_usd', 0), dict) else 0
+            if liquidity_usd < 1000:
+                risk_score += 2.0  # Very low liquidity
+            elif liquidity_usd < 5000:
+                risk_score += 1.0  # Low liquidity
+        except (ValueError, TypeError):
+            risk_score += 1.0  # Unknown liquidity = some risk
         
         return min(risk_score, 10.0)  # Cap at 10
     
     def _calculate_volume_score(self, token: Dict) -> float:
         """Calculate volume activity score (0-10, higher = more active)"""
-        volume_24h = token.get('volume_24h', 0)
-        txns_1h = token.get('txns_1h', 0)
+        # Handle dict/string values safely
+        try:
+            volume_24h = float(token.get('volume_24h', 0)) if not isinstance(token.get('volume_24h', 0), dict) else 0
+        except (ValueError, TypeError):
+            volume_24h = 0
+            
+        try:
+            txns_1h = int(token.get('txns_1h', 0)) if not isinstance(token.get('txns_1h', 0), dict) else 0
+        except (ValueError, TypeError):
+            txns_1h = 0
         
         # Volume scoring
         if volume_24h >= 1000000:  # $1M+
@@ -311,7 +342,11 @@ class DexScreenerScanner:
     
     def _calculate_liquidity_score(self, token: Dict) -> float:
         """Calculate liquidity score (0-10, higher = more liquid)"""
-        liquidity_usd = token.get('liquidity_usd', 0)
+        # Handle dict/string values safely
+        try:
+            liquidity_usd = float(token.get('liquidity_usd', 0)) if not isinstance(token.get('liquidity_usd', 0), dict) else 0
+        except (ValueError, TypeError):
+            liquidity_usd = 0
         
         if liquidity_usd >= 1000000:  # $1M+
             return 10.0
