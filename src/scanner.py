@@ -95,9 +95,18 @@ class DexScreenerScanner:
             all_tokens = []
             current_time = datetime.utcnow()
             
-            for pair in pairs:
+            logger.info(f"Processing {len(pairs)} pairs to extract tokens...")
+            
+            for i, pair in enumerate(pairs):
                 try:
+                    logger.debug(f"[{i+1}/{len(pairs)}] Processing pair: {pair.get('pairAddress', 'unknown')}")
+                    
+                    # Debug: Show raw pair data for first few pairs
+                    if i < 3:
+                        logger.info(f"Sample pair {i+1}: chainId={pair.get('chainId')}, baseToken={pair.get('baseToken', {}).get('symbol', 'N/A')}")
+                    
                     token_data = self._extract_token_data(pair)
+                    logger.debug(f"Extracted basic data: symbol={token_data.get('symbol')}, address={token_data.get('address', 'N/A')[:10]}...")
                     
                     # Add age calculation for AI features (but don't filter by it)
                     created_timestamp = pair.get('pairCreatedAt', 0)
@@ -115,18 +124,21 @@ class DexScreenerScanner:
                     token_data['volume_score'] = self._calculate_volume_score(token_data)
                     token_data['liquidity_score'] = self._calculate_liquidity_score(token_data)
                     
-                    # Debug logging
-                    logger.debug(f"Processing token: {token_data.get('symbol', 'UNKNOWN')} - Address: {token_data.get('address', 'N/A')}")
+                    logger.debug(f"Enhanced data: risk={token_data['risk_score']:.1f}, volume_score={token_data['volume_score']:.1f}")
                     
                     # Only apply minimal validation
                     if self._is_valid_token(token_data):
                         all_tokens.append(token_data)
-                        logger.debug(f"✅ Added token: {token_data['symbol']}")
+                        logger.info(f"✅ Added token {len(all_tokens)}: {token_data['symbol']} (${token_data.get('price_usd', 0)})")
                     else:
-                        logger.debug(f"❌ Rejected token: {token_data.get('symbol', 'UNKNOWN')} - Address: {token_data.get('address', 'missing')}, Price: {token_data.get('price_usd', 'missing')}")
+                        logger.warning(f"❌ Rejected token: {token_data.get('symbol', 'UNKNOWN')} - reason logged above")
                 
                 except (ValueError, TypeError) as e:
-                    logger.debug(f"Error parsing pair data: {e}")
+                    logger.error(f"Error processing pair {i+1}: {e}")
+                    logger.debug(f"Problematic pair data: {pair}")
+                    continue
+                except Exception as e:
+                    logger.error(f"Unexpected error processing pair {i+1}: {e}")
                     continue
             
             logger.info(f"Found {len(all_tokens)} tokens from DexScreener (no pre-filtering)")
@@ -148,36 +160,58 @@ class DexScreenerScanner:
     
     def _extract_token_data(self, pair: Dict) -> Dict:
         """Extract relevant token data from DexScreener pair"""
+        logger.debug(f"Extracting data from pair: {pair.get('pairAddress', 'unknown')}")
+        
         base_token = pair.get('baseToken', {})
         txns = pair.get('txns', {})
         volume = pair.get('volume', {})
         liquidity = pair.get('liquidity', {})
         
+        logger.debug(f"Base token data: {base_token}")
+        logger.debug(f"Volume data: {volume}")
+        logger.debug(f"Liquidity data: {liquidity}")
+        
         # Calculate total transactions (m5 and h1 available in new API)
         txns_5m = txns.get('m5', 0)
         txns_1h = txns.get('h1', 0)
         
-        return {
-            'symbol': base_token.get('symbol', 'UNKNOWN'),
-            'name': base_token.get('name', 'Unknown Token'),
-            'address': base_token.get('address', ''),
-            'price': float(pair.get('priceNative', 0)),
-            'price_usd': float(pair.get('priceUsd', 0)),
-            'volume_24h': float(volume.get('h24', 0)),
-            'volume_1h': float(volume.get('h1', 0)),
-            'txns_24h': int(txns_1h * 24) if txns_1h > 0 else 0,  # Estimate 24h from 1h
-            'txns_1h': int(txns_1h),
-            'txns_5m': int(txns_5m),
-            'price_change_24h': float(pair.get('priceChange', {}).get('h24', 0)),
-            'price_change_1h': float(pair.get('priceChange', {}).get('h1', 0)),
-            'liquidity_usd': float(liquidity.get('usd', 0)),
-            'market_cap': float(pair.get('fdv', 0)),  # Use fdv (fully diluted valuation)
-            'dex': pair.get('dexId', ''),
-            'pair_address': pair.get('pairAddress', ''),
-            'created_at': pair.get('pairCreatedAt', 0),
-            'chain_id': pair.get('chainId', 'solana'),
-            'source': 'dexscreener'
-        }
+        # Extract all data with error handling
+        try:
+            symbol = base_token.get('symbol', 'UNKNOWN')
+            address = base_token.get('address', '')
+            price_usd = float(pair.get('priceUsd', 0))
+            
+            logger.debug(f"Basic extraction: symbol={symbol}, address={address[:10] if address else 'empty'}, price=${price_usd}")
+            
+            extracted_data = {
+                'symbol': symbol,
+                'name': base_token.get('name', 'Unknown Token'),
+                'address': address,
+                'price': float(pair.get('priceNative', 0)),
+                'price_usd': price_usd,
+                'volume_24h': float(volume.get('h24', 0)),
+                'volume_1h': float(volume.get('h1', 0)),
+                'txns_24h': int(txns_1h * 24) if txns_1h > 0 else 0,  # Estimate 24h from 1h
+                'txns_1h': int(txns_1h),
+                'txns_5m': int(txns_5m),
+                'price_change_24h': float(pair.get('priceChange', {}).get('h24', 0)),
+                'price_change_1h': float(pair.get('priceChange', {}).get('h1', 0)),
+                'liquidity_usd': float(liquidity.get('usd', 0)),
+                'market_cap': float(pair.get('fdv', 0)),  # Use fdv (fully diluted valuation)
+                'dex': pair.get('dexId', ''),
+                'pair_address': pair.get('pairAddress', ''),
+                'created_at': pair.get('pairCreatedAt', 0),
+                'chain_id': pair.get('chainId', 'solana'),
+                'source': 'dexscreener'
+            }
+            
+            logger.debug(f"Successfully extracted token data for: {symbol}")
+            return extracted_data
+            
+        except Exception as e:
+            logger.error(f"Error in _extract_token_data: {e}")
+            logger.debug(f"Pair causing error: {json.dumps(pair, indent=2)[:500]}...")
+            raise
     
     def _is_valid_token(self, token: Dict) -> bool:
         """Ultra-minimal validation - let AI learn from ALL data"""
