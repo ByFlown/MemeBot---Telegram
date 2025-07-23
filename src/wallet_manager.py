@@ -14,6 +14,8 @@ from datetime import datetime
 import base58
 import base64
 
+from .solana_client_fix import create_safe_rpc_client
+
 logger = logging.getLogger(__name__)
 
 class WalletManager:
@@ -76,34 +78,17 @@ class WalletManager:
         return self.session
     
     async def get_rpc_client(self) -> AsyncClient:
-        """Get Solana RPC client with failover"""
-        endpoint = self.rpc_endpoints[self.current_rpc]
-        
-        # Create client without proxy parameters to avoid conflicts
+        """Get Solana RPC client with failover"""        
         for attempt in range(len(self.rpc_endpoints)):
+            endpoint = self.rpc_endpoints[self.current_rpc]
             try:
-                # Clear any proxy environment variables temporarily
-                import os
-                original_env = {}
-                proxy_vars = ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy']
-                
-                for var in proxy_vars:
-                    if var in os.environ:
-                        original_env[var] = os.environ[var]
-                        del os.environ[var]
-                
-                try:
-                    client = AsyncClient(endpoint, commitment=Commitment("confirmed"))
-                    return client
-                finally:
-                    # Restore proxy environment variables
-                    for var, value in original_env.items():
-                        os.environ[var] = value
+                client = create_safe_rpc_client(endpoint, commitment="confirmed")
+                logger.debug(f"Successfully created RPC client for endpoint: {endpoint}")
+                return client
                         
             except Exception as e:
                 logger.warning(f"RPC endpoint {endpoint} failed: {e}")
                 self.current_rpc = (self.current_rpc + 1) % len(self.rpc_endpoints)
-                endpoint = self.rpc_endpoints[self.current_rpc]
                 
         logger.error("All RPC endpoints failed")
         raise Exception("No working RPC endpoints available")

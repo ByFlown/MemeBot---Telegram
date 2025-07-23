@@ -27,6 +27,21 @@ from src.ai_logger import ai_trader_logger
 # Load environment variables
 load_dotenv()
 
+# Apply Solana client proxy fix for Fly.io
+try:
+    from src.solana_client_fix import patch_async_client, patch_async_client_init
+    
+    # Try both patching approaches for maximum compatibility
+    patch_success = patch_async_client()
+    if not patch_success:
+        print("Main patch failed, trying alternative approach...")
+        patch_async_client_init()
+    
+    print("✅ Solana client proxy fix applied successfully")
+except Exception as e:
+    print(f"⚠️ Warning: Could not apply Solana client proxy fix: {e}")
+    print("The bot will continue but may encounter proxy-related errors.")
+
 # Setup logging with debug for scanner
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
