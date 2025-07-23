@@ -102,6 +102,9 @@ class MemeBot:
                 "/performance - Performance dashboard\n"
                 "/backtest - Run backtest\n"
                 "/logs - Recent trading logs\n"
+                "/mlstats - ML model statistics\n"
+                "/retrain - Force model retraining\n"
+                "/quickstart - Generate training data\n"
                 "/dump - Emergency stop all positions",
                 parse_mode='Markdown'
             )
@@ -273,7 +276,7 @@ class MemeBot:
         await update.message.reply_text(msg[:4000])  # Telegram message limit
     
     async def ml_stats_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """🧠 Show ML learning statistics"""
+        """🧠 Show ML learning statistics and trigger initial training if needed"""
         if update.effective_user.id != OWNER_ID:
             return
         
@@ -288,19 +291,56 @@ class MemeBot:
             
             msg += f"🏷️ **Label Distribution:**\n"
             label_dist = stats.get('label_distribution', {})
-            for label, count in label_dist.items():
-                percentage = (count / stats.get('labeled_samples', 1)) * 100
-                msg += f"• {label.capitalize()}: {count} ({percentage:.1f}%)\n"
+            if label_dist:
+                for label, count in label_dist.items():
+                    percentage = (count / stats.get('labeled_samples', 1)) * 100
+                    msg += f"• {label.capitalize()}: {count} ({percentage:.1f}%)\n"
+            else:
+                msg += f"• No labeled data yet\n"
             
-            msg += f"\n📈 **Performance:**\n"
+            # Enhanced model performance info
+            msg += f"\n📈 **Model Status:**\n"
             msg += f"• Model Trained: {'✅ Yes' if stats.get('model_trained', False) else '❌ No'}\n"
+            
+            model_perf = stats.get('model_performance', {})
+            if model_perf:
+                msg += f"• Model Type: {model_perf.get('model_type', 'Unknown')}\n"
+                msg += f"• Features Used: {model_perf.get('features_count', 19)}\n"
+                msg += f"• Recent Good Ratio: {model_perf.get('recent_good_ratio', 0)*100:.1f}%\n"
+            
             msg += f"• Avg Return (7d): {stats.get('recent_avg_return_7d', 0)*100:+.2f}%\n"
             
             if not stats.get('model_trained', False):
-                msg += f"\n⏳ **Status:** Collecting training data...\n"
-                msg += f"Model will start making predictions after enough data is collected."
+                msg += f"\n⏳ **Status:** Model not yet trained\n"
+                
+                # Check if we should trigger initial training
+                labeled_count = stats.get('labeled_samples', 0)
+                if labeled_count == 0:
+                    msg += f"🔥 **Triggering initial training data generation...**\n"
+                    await update.message.reply_text(msg)
+                    
+                    # Trigger initial data generation and training
+                    await self.self_learning_trader._generate_initial_training_data()
+                    
+                    # Get updated stats
+                    updated_stats = self.self_learning_trader.get_training_stats()
+                    follow_up_msg = f"\n✅ **Update:** Generated {updated_stats.get('labeled_samples', 0)} training samples\n"
+                    
+                    if updated_stats.get('model_trained', False):
+                        follow_up_msg += f"🎯 **Model trained and ready for live trading!**"
+                    else:
+                        follow_up_msg += f"⏳ Waiting for more data to complete training..."
+                    
+                    await update.message.reply_text(follow_up_msg)
+                    return
+                    
+                elif labeled_count < 50:
+                    msg += f"Need {50 - labeled_count} more samples for initial training."
+                else:
+                    msg += f"Ready for training - use /retrain to train model"
             else:
-                msg += f"\n🤖 **Status:** Active learning and trading!"
+                msg += f"\n🤖 **Status:** Active learning and live trading!"
+                msg += f"\nModel continuously learns from new price data every {stats.get('learning_window_minutes', 20)} minutes."
             
             await update.message.reply_text(msg)
             
@@ -514,6 +554,9 @@ class MemeBot:
                 BotCommand("performance", "Show performance dashboard"),
                 BotCommand("backtest", "Run backtesting analysis"),
                 BotCommand("logs", "Show recent trading logs"),
+                BotCommand("mlstats", "Show ML model statistics and training status"),
+                BotCommand("retrain", "Force ML model retraining"),
+                BotCommand("quickstart", "Generate immediate training data"),
                 BotCommand("dump", "Emergency stop - close all positions")
             ]
             

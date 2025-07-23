@@ -436,7 +436,7 @@ class SelfLearningTrader:
             logger.error(f"Error getting labeled sample count: {e}")
             return 0
     
-    async def train_model(self):
+    async def train_model(self, use_initial_split=False):
         """
         🧠 Trainiert ML-Modell mit gesammelten Daten
         KERN-FUNKTION: Hier lernt das System!
@@ -468,9 +468,10 @@ class SelfLearningTrader:
             # Scale features (maintain feature names for consistency)
             X_scaled = self.scaler.fit_transform(X)
             
-            # Split data  
+            # Split data (80/20 for initial training, 0.2 for regular retraining)
+            test_size = 0.2 if use_initial_split else 0.2
             X_train, X_test, y_train, y_test = train_test_split(
-                X_scaled, y, test_size=0.2, random_state=42, stratify=y if len(np.unique(y)) > 1 else None
+                X_scaled, y, test_size=test_size, random_state=42, stratify=y if len(np.unique(y)) > 1 else None
             )
             
             # Train multiple models and choose best
@@ -482,6 +483,7 @@ class SelfLearningTrader:
             best_model = None
             best_score = 0
             best_name = ""
+            best_test_results = {}
             
             for name, model in models.items():
                 try:
@@ -493,13 +495,27 @@ class SelfLearningTrader:
                         best_model = model
                         best_name = name
                         
+                        # Calculate detailed test results for the best model
+                        y_pred = model.predict(X_test)
+                        from sklearn.metrics import precision_score, recall_score, f1_score
+                        
+                        best_test_results = {
+                            'accuracy': score,
+                            'precision': precision_score(y_test, y_pred, average='weighted', zero_division=0),
+                            'recall': recall_score(y_test, y_pred, average='weighted', zero_division=0),
+                            'f1': f1_score(y_test, y_pred, average='weighted', zero_division=0),
+                            'training_samples': len(X_train),
+                            'test_samples': len(X_test),
+                            'label_distribution': dict(y.value_counts())
+                        }
+                        
                 except Exception as e:
                     logger.warning(f"Error training {name}: {e}")
                     continue
             
             if best_model is None:
                 logger.error("No model could be trained successfully")
-                return
+                return best_test_results
             
             # Update main model
             old_score = self.get_model_performance() if self.is_trained else 0
@@ -516,21 +532,30 @@ class SelfLearningTrader:
             self.save_models()
             
             # Log training results
-            ml_logger.model_update(
-                model_name=f"SelfLearningTrader_{best_name}",
-                update_type="full_retrain",
-                performance_before=old_score,
-                performance_after=best_score,
-                update_details={
-                    'training_samples': len(X_train),
-                    'test_samples': len(X_test),
-                    'feature_count': len(feature_columns),
-                    'model_type': best_name,
-                    'label_distribution': dict(y.value_counts())
-                }
+            training_log_msg = (
+                f"🧠 **ML Model Training Results**\n"
+                f"Model Type: {best_name}\n"
+                f"Training Samples: {len(X_train)} (80%)\n"
+                f"Test Samples: {len(X_test)} (20%)\n"
+                f"Accuracy: {best_test_results['accuracy']:.3f}\n"
+                f"Precision: {best_test_results['precision']:.3f}\n"
+                f"Recall: {best_test_results['recall']:.3f}\n"
+                f"F1-Score: {best_test_results['f1']:.3f}\n"
+                f"Label Distribution: {best_test_results['label_distribution']}"
             )
             
-            logger.info(f"Model trained successfully: {best_name} with score {best_score:.3f}")
+            logger.info(training_log_msg)
+            print(training_log_msg)  # Also print to console
+            
+            ml_logger.model_update(
+                model_name=f"SelfLearningTrader_{best_name}",
+                update_type="full_retrain" if use_initial_split else "incremental_retrain",
+                performance_before=old_score,
+                performance_after=best_score,
+                update_details=best_test_results
+            )
+            
+            return best_test_results
             
         except Exception as e:
             logger.error(f"Error training model: {e}")
@@ -539,6 +564,7 @@ class SelfLearningTrader:
                 error_details={'error': str(e)},
                 recovery_action="Continuing with existing model if available"
             )
+            return {}
     
     def load_training_data(self) -> pd.DataFrame:
         """
@@ -752,6 +778,26 @@ class SelfLearningTrader:
             """)
             recent_avg_return = cursor.fetchone()[0] or 0
             
+            # Model performance metrics (if available)
+            model_performance = {}
+            if self.is_trained:
+                try:
+                    # Get recent model accuracy from logs or calculate from recent predictions
+                    cursor.execute("""
+                        SELECT AVG(CASE WHEN label = 'good' THEN 1 ELSE 0 END) as good_ratio
+                        FROM training_data 
+                        WHERE labeled = 1 AND timestamp > datetime('now', '-7 days')
+                    """)
+                    good_ratio = cursor.fetchone()[0] or 0
+                    
+                    model_performance = {
+                        'recent_good_ratio': good_ratio,
+                        'model_type': type(self.model).__name__ if self.model else 'Unknown',
+                        'features_count': 19  # Number of features used
+                    }
+                except Exception as e:
+                    logger.debug(f"Could not calculate model performance: {e}")
+            
             conn.close()
             
             return {
@@ -760,7 +806,8 @@ class SelfLearningTrader:
                 'label_distribution': label_dist,
                 'recent_avg_return_7d': recent_avg_return,
                 'model_trained': self.is_trained,
-                'learning_window_minutes': self.learning_window_minutes
+                'learning_window_minutes': self.learning_window_minutes,
+                'model_performance': model_performance
             }
             
         except Exception as e:
@@ -769,7 +816,7 @@ class SelfLearningTrader:
     
     async def _generate_initial_training_data(self):
         """
-        ⚡ Generiert sofort Trainingsdaten für sofortiges Training
+        ⚡ Generiert sofort Trainingsdaten für sofortiges Training mit 80/20 Split
         """
         try:
             if self._initial_data_generated:
@@ -790,7 +837,31 @@ class SelfLearningTrader:
             self._initial_data_generated = True
             
             if samples_generated > 0:
-                logger.info(f"✅ Generated {samples_generated} training samples - system ready for immediate trading!")
+                logger.info(f"✅ Generated {samples_generated} training samples")
+                
+                # Now perform initial 80/20 training if we have enough data
+                labeled_count = self.get_labeled_sample_count()
+                if labeled_count >= 50:  # Minimum samples for meaningful 80/20 split
+                    logger.info("🧠 Performing initial 80/20 training with backtesting data...")
+                    print("🧠 **Performing Initial ML Training with 80/20 Split**")
+                    
+                    # Train with 80/20 split for initial model
+                    training_results = await self.train_model(use_initial_split=True)
+                    
+                    if training_results:
+                        success_msg = (
+                            f"✅ **INITIAL TRAINING COMPLETE** ✅\n"
+                            f"📊 Training: {training_results.get('training_samples', 0)} samples (80%)\n"
+                            f"🎯 Testing: {training_results.get('test_samples', 0)} samples (20%)\n"
+                            f"🎯 Accuracy: {training_results.get('accuracy', 0):.3f}\n"
+                            f"🔄 **System now ready for live training and prediction!**"
+                        )
+                        logger.info(success_msg)
+                        print(success_msg)
+                    else:
+                        logger.warning("⚠️ Initial training completed but no results returned")
+                else:
+                    logger.info(f"⏳ Only {labeled_count} samples generated, need 50+ for meaningful training")
             else:
                 logger.warning("⚠️ Could not generate immediate training data - will wait for real-time data")
             
