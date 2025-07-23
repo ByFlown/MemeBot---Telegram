@@ -63,6 +63,9 @@ class SelfLearningTrader:
         
         # Load existing model if available
         self.load_models()
+        
+        # Flag for initial data generation
+        self._initial_data_generated = False
     
     def init_database(self):
         """Initialize SQLite database for training data"""
@@ -580,6 +583,10 @@ class SelfLearningTrader:
         HAUPTFUNKTION: Hier entscheidet das System autonom!
         """
         try:
+            # Generate initial training data if not done yet
+            if not self.is_trained and not self._initial_data_generated:
+                await self._generate_initial_training_data()
+            
             if not self.is_trained:
                 return {
                     'should_trade': False,
@@ -759,6 +766,37 @@ class SelfLearningTrader:
         except Exception as e:
             logger.error(f"Error getting training stats: {e}")
             return {}
+    
+    async def _generate_initial_training_data(self):
+        """
+        ⚡ Generiert sofort Trainingsdaten für sofortiges Training
+        """
+        try:
+            if self._initial_data_generated:
+                return
+            
+            logger.info("🔥 Generating immediate training data for instant ML training...")
+            ml_logger.analysis(
+                "Starting immediate training data generation",
+                analysis_data={'reason': 'no_existing_model'}
+            )
+            
+            # Import and use historical data generator
+            from .historical_data_generator import HistoricalDataGenerator
+            
+            generator = HistoricalDataGenerator(self)
+            samples_generated = await generator.generate_immediate_training_data(batch_size=300)
+            
+            self._initial_data_generated = True
+            
+            if samples_generated > 0:
+                logger.info(f"✅ Generated {samples_generated} training samples - system ready for immediate trading!")
+            else:
+                logger.warning("⚠️ Could not generate immediate training data - will wait for real-time data")
+            
+        except Exception as e:
+            logger.error(f"Error generating initial training data: {e}")
+            self._initial_data_generated = True  # Don't retry
     
     async def close(self):
         """

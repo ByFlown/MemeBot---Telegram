@@ -328,6 +328,33 @@ class MemeBot:
         except Exception as e:
             await update.message.reply_text(f"❌ Retraining failed: {e}")
     
+    async def quickstart_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """⚡ Generate immediate training data for instant ML training"""
+        if update.effective_user.id != OWNER_ID:
+            return
+        
+        try:
+            await update.message.reply_text("⚡ **Quick Start - Generating immediate training data...**\n\nThis will fetch historical token data and create hundreds of training samples instantly!")
+            
+            # Force immediate data generation
+            from src.historical_data_generator import HistoricalDataGenerator
+            generator = HistoricalDataGenerator(self.self_learning_trader)
+            
+            samples_generated = await generator.generate_immediate_training_data(batch_size=500)
+            
+            stats = self.self_learning_trader.get_training_stats()
+            
+            await update.message.reply_text(
+                f"🚀 **Quick Start Complete!**\n\n"
+                f"✅ Generated: {samples_generated} training samples\n"
+                f"📊 Total Samples: {stats.get('labeled_samples', 0)}\n"
+                f"🧠 Model Status: {'✅ Trained & Ready!' if stats.get('model_trained') else '⏳ Training...'}\n\n"
+                f"**The AI system is now ready for immediate trading decisions!**"
+            )
+            
+        except Exception as e:
+            await update.message.reply_text(f"❌ Quick start failed: {e}")
+    
     async def dump_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Emergency stop - sell all positions"""
         if update.effective_user.id != OWNER_ID:
@@ -548,6 +575,7 @@ async def main():
         application.add_handler(CommandHandler("dump", bot.dump_command))
         application.add_handler(CommandHandler("mlstats", bot.ml_stats_command))
         application.add_handler(CommandHandler("retrain", bot.retrain_command))
+        application.add_handler(CommandHandler("quickstart", bot.quickstart_command))
         
         # Setup scheduler
         bot.setup_scheduler()
