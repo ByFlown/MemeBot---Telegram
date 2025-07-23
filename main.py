@@ -22,6 +22,7 @@ from src.backtester import Backtester
 from src.logger import TradingLogger
 from src.performance_monitor import PerformanceMonitor
 from src.web_interface import WebInterface
+from src.ai_logger import ai_trader_logger
 
 # Load environment variables
 load_dotenv()
@@ -34,6 +35,13 @@ logging.basicConfig(
 
 # Enable debug for scanner specifically  
 logging.getLogger('src.scanner').setLevel(logging.DEBUG)
+
+# Enable AI system logging
+logging.getLogger('ai.trader').setLevel(logging.INFO)
+logging.getLogger('ai.scanner').setLevel(logging.INFO)
+logging.getLogger('ai.analyzer').setLevel(logging.INFO)
+logging.getLogger('ai.model').setLevel(logging.INFO)
+
 logger = logging.getLogger(__name__)
 
 class MemeBot:
@@ -293,6 +301,16 @@ class MemeBot:
                         if trade_decision['should_trade']:
                             logger.info(f"🎯 Trading opportunity: {token['symbol']} - Score: {trade_decision['confidence']:.2f}")
                             
+                            # Log AI trade execution decision
+                            ai_trader_logger.trade_execution(
+                                action='buy',
+                                token_address=token['address'],
+                                amount=trade_decision['amount'],
+                                ai_confidence=trade_decision['confidence'],
+                                reasoning=trade_decision['reasoning'].split(';') if isinstance(trade_decision['reasoning'], str) else [str(trade_decision['reasoning'])],
+                                expected_outcome='profitable' if trade_decision['confidence'] > 0.7 else 'uncertain'
+                            )
+                            
                             if self.real_mode:
                                 # Execute real trade
                                 trade_result = await self.wallet_manager.execute_trade(
@@ -313,7 +331,7 @@ class MemeBot:
                             self.trading_logger.log_trade(token, trade_result, trade_decision)
                             
                             # Update AI model with result (for learning)
-                            self.ai_trader.update_model(combined_data, trade_result)
+                            await self.ai_trader.update_model(combined_data, trade_result)
                             
                             # Update stats
                             self.total_trades += 1

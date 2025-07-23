@@ -78,12 +78,35 @@ class WalletManager:
     async def get_rpc_client(self) -> AsyncClient:
         """Get Solana RPC client with failover"""
         endpoint = self.rpc_endpoints[self.current_rpc]
-        try:
-            return AsyncClient(endpoint, commitment=Commitment("confirmed"))
-        except Exception as e:
-            logger.warning(f"RPC endpoint {endpoint} failed: {e}")
-            self.current_rpc = (self.current_rpc + 1) % len(self.rpc_endpoints)
-            return AsyncClient(self.rpc_endpoints[self.current_rpc])
+        
+        # Create client without proxy parameters to avoid conflicts
+        for attempt in range(len(self.rpc_endpoints)):
+            try:
+                # Clear any proxy environment variables temporarily
+                import os
+                original_env = {}
+                proxy_vars = ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy']
+                
+                for var in proxy_vars:
+                    if var in os.environ:
+                        original_env[var] = os.environ[var]
+                        del os.environ[var]
+                
+                try:
+                    client = AsyncClient(endpoint, commitment=Commitment("confirmed"))
+                    return client
+                finally:
+                    # Restore proxy environment variables
+                    for var, value in original_env.items():
+                        os.environ[var] = value
+                        
+            except Exception as e:
+                logger.warning(f"RPC endpoint {endpoint} failed: {e}")
+                self.current_rpc = (self.current_rpc + 1) % len(self.rpc_endpoints)
+                endpoint = self.rpc_endpoints[self.current_rpc]
+                
+        logger.error("All RPC endpoints failed")
+        raise Exception("No working RPC endpoints available")
     
     async def get_sol_balance(self) -> float:
         """Get SOL balance of the wallet"""

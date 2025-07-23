@@ -7,6 +7,8 @@ from solders.pubkey import Pubkey
 import json
 from datetime import datetime
 
+from .ai_logger import ai_analyzer_logger
+
 logger = logging.getLogger(__name__)
 
 class OnchainAnalyzer:
@@ -36,20 +38,35 @@ class OnchainAnalyzer:
     async def get_rpc_client(self) -> AsyncClient:
         """Get Solana RPC client with failover"""
         endpoint = self.rpc_endpoints[self.current_rpc]
-        try:
-            client = AsyncClient(endpoint)
-            await client.__aenter__()
-            return client
-        except Exception as e:
-            logger.warning(f"RPC endpoint {endpoint} failed: {e}")
-            self.current_rpc = (self.current_rpc + 1) % len(self.rpc_endpoints)
+        
+        # Create client without proxy parameters to avoid conflicts
+        for attempt in range(len(self.rpc_endpoints)):
             try:
-                client = AsyncClient(self.rpc_endpoints[self.current_rpc])
-                await client.__aenter__()
-                return client
+                # Clear any proxy environment variables temporarily
+                import os
+                original_env = {}
+                proxy_vars = ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy']
+                
+                for var in proxy_vars:
+                    if var in os.environ:
+                        original_env[var] = os.environ[var]
+                        del os.environ[var]
+                
+                try:
+                    client = AsyncClient(endpoint)
+                    return client
+                finally:
+                    # Restore proxy environment variables
+                    for var, value in original_env.items():
+                        os.environ[var] = value
+                        
             except Exception as e:
-                logger.error(f"All RPC endpoints failed: {e}")
-                raise
+                logger.warning(f"RPC endpoint {endpoint} failed: {e}")
+                self.current_rpc = (self.current_rpc + 1) % len(self.rpc_endpoints)
+                endpoint = self.rpc_endpoints[self.current_rpc]
+                
+        logger.error("All RPC endpoints failed")
+        raise Exception("No working RPC endpoints available")
     
     async def analyze_token(self, token_address: str) -> Dict:
         """Comprehensive onchain analysis of a token"""
@@ -78,6 +95,23 @@ class OnchainAnalyzer:
             # Calculate risk and confidence scores
             analysis['risk_score'] = self._calculate_risk_score(analysis)
             analysis['confidence_score'] = self._calculate_confidence_score(analysis)
+            
+            # Log AI analysis
+            ai_analyzer_logger.analysis(
+                "Onchain analysis completed",
+                token_address=token_address,
+                analysis_data={
+                    'token_name': analysis.get('token_info', {}).get('name', 'Unknown'),
+                    'holder_count': analysis.get('token_info', {}).get('holder_count', 0),
+                    'liquidity_usd': analysis.get('liquidity_analysis', {}).get('liquidity_usd', 0)
+                },
+                scores={
+                    'risk_score': analysis['risk_score'],
+                    'confidence_score': analysis['confidence_score'],
+                    'holder_concentration': analysis.get('holder_analysis', {}).get('holder_concentration', 0),
+                    'top_10_percentage': analysis.get('holder_analysis', {}).get('top_10_percentage', 0)
+                }
+            )
             
             return analysis
             
@@ -175,7 +209,7 @@ class OnchainAnalyzer:
         """Analyze developer wallet activity and behavior"""
         try:
             # This would require more sophisticated analysis of the token's creation
-            # and developer wallet transactions
+            # and developer wallet transactions  
             rpc_client = await self.get_rpc_client()
             
             try:
@@ -194,7 +228,10 @@ class OnchainAnalyzer:
                 return {}
                 
             finally:
-                await rpc_client.__aexit__(None, None, None)
+                try:
+                    await rpc_client.close()
+                except:
+                    pass  # Ignore close errors
             
         except Exception as e:
             logger.error(f"Error analyzing dev activity: {e}")

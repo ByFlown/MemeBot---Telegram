@@ -6,6 +6,8 @@ from datetime import datetime, timedelta
 import json
 import numpy as np
 
+from .ai_logger import ai_scanner_logger
+
 logger = logging.getLogger(__name__)
 
 class DexScreenerScanner:
@@ -94,8 +96,20 @@ class DexScreenerScanner:
             # Process ALL tokens - let AI learn from everything
             all_tokens = []
             current_time = datetime.utcnow()
+            scan_start = datetime.now()
+            rejection_reasons = {}
             
             logger.info(f"Processing {len(pairs)} pairs to extract tokens...")
+            
+            # Log AI scanning start
+            ai_scanner_logger.analysis(
+                "Token scanning initiated",
+                analysis_data={
+                    'total_pairs': len(pairs),
+                    'chain': chain,
+                    'search_queries_used': len(search_queries)
+                }
+            )
             
             for i, pair in enumerate(pairs):
                 try:
@@ -131,7 +145,11 @@ class DexScreenerScanner:
                         all_tokens.append(token_data)
                         logger.info(f"✅ Added token {len(all_tokens)}: {token_data['symbol']} (${token_data.get('price_usd', 0)})")
                     else:
-                        logger.warning(f"❌ Rejected token: {token_data.get('symbol', 'UNKNOWN')} - reason logged above")
+                        # Track rejection reasons for AI logging
+                        symbol = token_data.get('symbol', 'UNKNOWN')
+                        rejection_reason = self._get_rejection_reason(token_data)
+                        rejection_reasons[rejection_reason] = rejection_reasons.get(rejection_reason, 0) + 1
+                        logger.warning(f"❌ Rejected token: {symbol} - {rejection_reason}")
                 
                 except (ValueError, TypeError) as e:
                     logger.error(f"Error processing pair {i+1}: {e}")
@@ -141,7 +159,16 @@ class DexScreenerScanner:
                     logger.error(f"Unexpected error processing pair {i+1}: {e}")
                     continue
             
+            scan_duration = (datetime.now() - scan_start).total_seconds()
             logger.info(f"Found {len(all_tokens)} tokens from DexScreener (no pre-filtering)")
+            
+            # Log AI scanning completion
+            ai_scanner_logger.scanning_decision(
+                tokens_analyzed=len(pairs),
+                tokens_accepted=len(all_tokens),
+                rejection_reasons=rejection_reasons,
+                analysis_duration=scan_duration
+            )
             
             # Add detailed logging if we found pairs but no valid tokens
             if len(pairs) > 0 and len(all_tokens) == 0:
@@ -412,3 +439,30 @@ class DexScreenerScanner:
     
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         await self.close()
+    
+    def _get_rejection_reason(self, token_data: Dict) -> str:
+        """Get the specific reason why a token was rejected"""
+        try:
+            # Check basic data requirements
+            if not token_data.get('symbol'):
+                return "missing_symbol"
+            if not token_data.get('address'):
+                return "missing_address"
+            if token_data.get('price_usd', 0) <= 0:
+                return "invalid_price"
+            
+            # Check volume
+            volume_24h = token_data.get('volume_24h', 0)
+            if volume_24h <= 0:
+                return "zero_volume"
+                
+            # Check market cap
+            market_cap = token_data.get('market_cap', 0)
+            if market_cap <= 0:
+                return "invalid_market_cap"
+                
+            # If no specific reason found, token should have been accepted
+            return "unknown_rejection"
+            
+        except Exception:
+            return "validation_error"

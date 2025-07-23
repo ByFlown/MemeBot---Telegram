@@ -16,6 +16,8 @@ from stable_baselines3 import PPO, A2C
 from stable_baselines3.common.vec_env import DummyVecEnv
 from stable_baselines3.common.callbacks import BaseCallback
 
+from .ai_logger import ai_trader_logger, ai_model_logger
+
 logger = logging.getLogger(__name__)
 
 class TradingEnvironment(gym.Env):
@@ -278,7 +280,7 @@ class AITrader:
             else:
                 position_size = 0.0
             
-            return {
+            decision_result = {
                 'should_trade': should_trade,
                 'confidence': combined_confidence,
                 'risk_score': risk_score,
@@ -288,8 +290,28 @@ class AITrader:
                 'rl_confidence': rl_decision['confidence']
             }
             
+            # Log AI decision
+            ai_trader_logger.decision(
+                f"Trading decision: {'TRADE' if should_trade else 'SKIP'}",
+                decision_data={
+                    'token_symbol': token_data.get('symbol', 'UNKNOWN'),
+                    'price_usd': token_data.get('price_usd', 0),
+                    'position_size_pct': position_size * 100,
+                    'ml_vs_rl': f"ML:{ml_decision['confidence']:.3f} RL:{rl_decision['confidence']:.3f}"
+                },
+                confidence=combined_confidence,
+                reasoning=f"Risk:{risk_score:.1f} Age:{token_data.get('age_hours', 0):.1f}h"
+            )
+            
+            return decision_result
+            
         except Exception as e:
             logger.error(f"Error in trading decision: {e}")
+            ai_trader_logger.error(
+                "Trading decision failed",
+                error_details={'token': token_data.get('symbol', 'UNKNOWN'), 'error': str(e)},
+                recovery_action="Returning safe default (no trade)"
+            )
             return {
                 'should_trade': False,
                 'confidence': 0.0,
@@ -456,6 +478,29 @@ class AITrader:
         
         return "; ".join(reasons) if reasons else "Standard analysis"
     
+    def _calculate_model_performance(self) -> float:
+        """Calculate current model performance based on recent trades"""
+        try:
+            if len(self.training_data) < 10:
+                return 0.5  # Default performance
+            
+            # Get recent trade results (last 50 trades)
+            recent_trades = self.training_data[-50:]
+            profitable_trades = sum(1 for trade in recent_trades if trade.get('profit_loss', 0) > 0)
+            
+            if len(recent_trades) == 0:
+                return 0.5
+            
+            success_rate = profitable_trades / len(recent_trades)
+            average_profit = sum(trade.get('profit_loss', 0) for trade in recent_trades) / len(recent_trades)
+            
+            # Combine success rate and average profit (normalized)
+            performance = (success_rate * 0.7) + (min(max(average_profit, -1), 1) * 0.3 + 0.5)
+            return max(0.0, min(1.0, performance))
+            
+        except Exception:
+            return 0.5
+    
     async def update_model(self, token_data: Dict, trade_result: Dict):
         """Update models with new trading result"""
         try:
@@ -469,12 +514,29 @@ class AITrader:
             
             self.training_data.append(training_sample)
             
+            # Log learning update
+            ai_model_logger.learning(
+                "Model updated with trade result",
+                learning_data={
+                    'token': token_data.get('symbol', 'UNKNOWN'),
+                    'action': trade_result.get('action', 'unknown'),
+                    'success': trade_result.get('success', False),
+                    'training_samples': len(self.training_data)
+                },
+                reward=trade_result.get('profit_loss', 0)
+            )
+            
             # Retrain models periodically
             if len(self.training_data) % 100 == 0:  # Retrain every 100 samples
                 await self.retrain_model()
             
         except Exception as e:
             logger.error(f"Error updating model: {e}")
+            ai_model_logger.error(
+                "Model update failed",
+                error_details={'error': str(e)},
+                recovery_action="Continuing without model update"
+            )
     
     async def retrain_model(self):
         """Retrain all models with recent data"""
@@ -484,6 +546,7 @@ class AITrader:
                 return
             
             logger.info(f"Retraining models with {len(self.training_data)} samples")
+            retrain_start = datetime.now()
             
             # Prepare training data
             X, y_price, y_risk = self._prepare_training_data()
@@ -491,6 +554,9 @@ class AITrader:
             if len(X) == 0:
                 logger.warning("No valid training data")
                 return
+            
+            # Calculate performance metrics before training
+            old_performance = self._calculate_model_performance() if hasattr(self, '_last_performance') else None
             
             # Scale features
             X_scaled = self.scaler.fit_transform(X)
@@ -502,13 +568,36 @@ class AITrader:
             # Train RL model
             await self._train_rl_model()
             
+            # Calculate performance metrics after training
+            new_performance = self._calculate_model_performance()
+            self._last_performance = new_performance
+            
             # Save models
             self.save_models()
             
+            retrain_duration = (datetime.now() - retrain_start).total_seconds()
             logger.info("Models retrained successfully")
+            
+            # Log model update
+            ai_model_logger.model_update(
+                model_name="AI Trading Models",
+                update_type="full_retrain",
+                performance_before=old_performance,
+                performance_after=new_performance,
+                update_details={
+                    'training_samples': len(self.training_data),
+                    'features_count': len(X[0]) if len(X) > 0 else 0,
+                    'retrain_duration_sec': retrain_duration
+                }
+            )
             
         except Exception as e:
             logger.error(f"Error retraining models: {e}")
+            ai_model_logger.error(
+                "Model retraining failed",
+                error_details={'error': str(e), 'training_samples': len(self.training_data)},
+                recovery_action="Continuing with existing models"
+            )
     
     def _prepare_training_data(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Prepare training data for ML models"""
