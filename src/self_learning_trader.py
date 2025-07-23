@@ -837,11 +837,11 @@ class SelfLearningTrader:
             self._initial_data_generated = True
             
             if samples_generated > 0:
-                logger.info(f"✅ Generated {samples_generated} training samples")
+                logger.info(f"✅ Generated {samples_generated} training samples from real token data")
                 
                 # Now perform initial 80/20 training if we have enough data
                 labeled_count = self.get_labeled_sample_count()
-                if labeled_count >= 50:  # Minimum samples for meaningful 80/20 split
+                if labeled_count >= 20:  # Lower threshold since we're using real data only
                     logger.info("🧠 Performing initial 80/20 training with backtesting data...")
                     print("🧠 **Performing Initial ML Training with 80/20 Split**")
                     
@@ -861,9 +861,9 @@ class SelfLearningTrader:
                     else:
                         logger.warning("⚠️ Initial training completed but no results returned")
                 else:
-                    logger.info(f"⏳ Only {labeled_count} samples generated, need 50+ for meaningful training")
+                    logger.info(f"⏳ Only {labeled_count} real samples generated, need 20+ for training. Will continue collecting live data.")
             else:
-                logger.warning("⚠️ Could not generate immediate training data - will wait for real-time data")
+                logger.warning("⚠️ Could not fetch real token data from DexScreener - will collect data through live trading")
             
         except Exception as e:
             logger.error(f"Error generating initial training data: {e}")
