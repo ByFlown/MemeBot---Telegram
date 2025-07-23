@@ -37,11 +37,19 @@ class OnchainAnalyzer:
         """Get Solana RPC client with failover"""
         endpoint = self.rpc_endpoints[self.current_rpc]
         try:
-            return AsyncClient(endpoint)
+            client = AsyncClient(endpoint)
+            await client.__aenter__()
+            return client
         except Exception as e:
             logger.warning(f"RPC endpoint {endpoint} failed: {e}")
             self.current_rpc = (self.current_rpc + 1) % len(self.rpc_endpoints)
-            return AsyncClient(self.rpc_endpoints[self.current_rpc])
+            try:
+                client = AsyncClient(self.rpc_endpoints[self.current_rpc])
+                await client.__aenter__()
+                return client
+            except Exception as e:
+                logger.error(f"All RPC endpoints failed: {e}")
+                raise
     
     async def analyze_token(self, token_address: str) -> Dict:
         """Comprehensive onchain analysis of a token"""
@@ -186,7 +194,7 @@ class OnchainAnalyzer:
                 return {}
                 
             finally:
-                await rpc_client.close()
+                await rpc_client.__aexit__(None, None, None)
             
         except Exception as e:
             logger.error(f"Error analyzing dev activity: {e}")
