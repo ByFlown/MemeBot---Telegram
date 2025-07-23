@@ -105,6 +105,7 @@ class MemeBot:
                 "/mlstats - ML model statistics\n"
                 "/retrain - Force model retraining\n"
                 "/quickstart - Generate training data\n"
+                "/clearmodel - Clear model for fresh training\n"
                 "/dump - Emergency stop all positions",
                 parse_mode='Markdown'
             )
@@ -395,6 +396,31 @@ class MemeBot:
         except Exception as e:
             await update.message.reply_text(f"❌ Quick start failed: {e}")
     
+    async def clearmodel_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """🗑️ Clear ML model and training data for fresh 80/20 training"""
+        if update.effective_user.id != OWNER_ID:
+            return
+        
+        try:
+            await update.message.reply_text("🗑️ **Clearing ML model and training data...**\n\n⚠️ This will delete all trained models and start fresh!")
+            
+            # Clear the model from memory and files
+            cleared = await self.self_learning_trader.clear_model()
+            
+            if cleared:
+                await update.message.reply_text(
+                    "✅ **Model Cleared Successfully!**\n\n"
+                    f"🧠 All trained models deleted\n"
+                    f"📊 Training data cleared\n"
+                    f"🔄 System reset to fresh state\n\n"
+                    f"**Use /mlstats to trigger fresh 80/20 training!**"
+                )
+            else:
+                await update.message.reply_text("❌ Failed to clear model - check logs for details")
+            
+        except Exception as e:
+            await update.message.reply_text(f"❌ Clear model failed: {e}")
+    
     async def dump_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Emergency stop - sell all positions"""
         if update.effective_user.id != OWNER_ID:
@@ -557,6 +583,7 @@ class MemeBot:
                 BotCommand("mlstats", "Show ML model statistics and training status"),
                 BotCommand("retrain", "Force ML model retraining"),
                 BotCommand("quickstart", "Generate immediate training data"),
+                BotCommand("clearmodel", "Clear ML model for fresh 80/20 training"),
                 BotCommand("dump", "Emergency stop - close all positions")
             ]
             
@@ -619,6 +646,7 @@ async def main():
         application.add_handler(CommandHandler("mlstats", bot.ml_stats_command))
         application.add_handler(CommandHandler("retrain", bot.retrain_command))
         application.add_handler(CommandHandler("quickstart", bot.quickstart_command))
+        application.add_handler(CommandHandler("clearmodel", bot.clearmodel_command))
         
         # Setup scheduler
         bot.setup_scheduler()

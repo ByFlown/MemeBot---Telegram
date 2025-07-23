@@ -869,6 +869,54 @@ class SelfLearningTrader:
             logger.error(f"Error generating initial training data: {e}")
             self._initial_data_generated = True  # Don't retry
     
+    async def clear_model(self) -> bool:
+        """
+        🗑️ Clear all ML models and training data for fresh start
+        """
+        try:
+            import os
+            
+            # Clear models from memory
+            self.model = None
+            self.scaler = StandardScaler()
+            self.online_model = SGDClassifier(random_state=42)
+            self.is_trained = False
+            self._initial_data_generated = False
+            
+            # Clear price tracking
+            self.price_tracker.clear()
+            
+            # Delete model files
+            model_files = [
+                self.model_dir / "main_model.pkl",
+                self.model_dir / "scaler.pkl", 
+                self.model_dir / "online_model.pkl",
+                self.model_dir / "metadata.json"
+            ]
+            
+            for file_path in model_files:
+                if file_path.exists():
+                    os.remove(file_path)
+                    logger.info(f"Deleted model file: {file_path}")
+            
+            # Clear training database
+            try:
+                conn = sqlite3.connect(self.db_path)
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM training_data")
+                conn.commit()
+                conn.close()
+                logger.info("Cleared training database")
+            except Exception as e:
+                logger.warning(f"Error clearing training database: {e}")
+            
+            logger.info("✅ ML model and training data cleared successfully")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error clearing model: {e}")
+            return False
+    
     async def close(self):
         """
         🔚 Cleanup resources
