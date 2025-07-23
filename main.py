@@ -23,6 +23,7 @@ from src.logger import TradingLogger
 from src.performance_monitor import PerformanceMonitor
 from src.web_interface import WebInterface
 from src.ai_logger import ai_trader_logger
+from src.self_learning_trader import SelfLearningTrader
 
 # Load environment variables
 load_dotenv()
@@ -63,7 +64,8 @@ class MemeBot:
     def __init__(self):
         self.scanner = DexScreenerScanner()
         self.onchain_analyzer = OnchainAnalyzer()
-        self.ai_trader = AITrader()
+        self.ai_trader = AITrader()  # Keep old system for comparison
+        self.self_learning_trader = SelfLearningTrader()  # NEW: Self-learning system
         self.wallet_manager = WalletManager()
         self.backtester = Backtester()
         self.trading_logger = TradingLogger()
@@ -270,6 +272,62 @@ class MemeBot:
         
         await update.message.reply_text(msg[:4000])  # Telegram message limit
     
+    async def ml_stats_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """🧠 Show ML learning statistics"""
+        if update.effective_user.id != OWNER_ID:
+            return
+        
+        try:
+            stats = self.self_learning_trader.get_training_stats()
+            
+            msg = "🧠 **ML Self-Learning Statistics**\n\n"
+            msg += f"📊 **Training Data:**\n"
+            msg += f"• Total Samples: {stats.get('total_samples', 0)}\n"  
+            msg += f"• Labeled Samples: {stats.get('labeled_samples', 0)}\n"
+            msg += f"• Learning Window: {stats.get('learning_window_minutes', 20)} minutes\n\n"
+            
+            msg += f"🏷️ **Label Distribution:**\n"
+            label_dist = stats.get('label_distribution', {})
+            for label, count in label_dist.items():
+                percentage = (count / stats.get('labeled_samples', 1)) * 100
+                msg += f"• {label.capitalize()}: {count} ({percentage:.1f}%)\n"
+            
+            msg += f"\n📈 **Performance:**\n"
+            msg += f"• Model Trained: {'✅ Yes' if stats.get('model_trained', False) else '❌ No'}\n"
+            msg += f"• Avg Return (7d): {stats.get('recent_avg_return_7d', 0)*100:+.2f}%\n"
+            
+            if not stats.get('model_trained', False):
+                msg += f"\n⏳ **Status:** Collecting training data...\n"
+                msg += f"Model will start making predictions after enough data is collected."
+            else:
+                msg += f"\n🤖 **Status:** Active learning and trading!"
+            
+            await update.message.reply_text(msg)
+            
+        except Exception as e:
+            await update.message.reply_text(f"❌ Error getting ML stats: {e}")
+    
+    async def retrain_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """🔄 Force ML model retraining"""
+        if update.effective_user.id != OWNER_ID:
+            return
+        
+        try:
+            await update.message.reply_text("🧠 Starting ML model retraining...")
+            
+            # Force retrain
+            await self.self_learning_trader.train_model()
+            
+            stats = self.self_learning_trader.get_training_stats()
+            await update.message.reply_text(
+                f"✅ **Model Retrained Successfully!**\n\n"
+                f"📊 Trained on {stats.get('labeled_samples', 0)} samples\n"
+                f"🎯 Model Status: {'Active' if stats.get('model_trained') else 'Not Ready'}"
+            )
+            
+        except Exception as e:
+            await update.message.reply_text(f"❌ Retraining failed: {e}")
+    
     async def dump_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Emergency stop - sell all positions"""
         if update.effective_user.id != OWNER_ID:
@@ -310,43 +368,47 @@ class MemeBot:
                         # Combine data for AI analysis
                         combined_data = {**token, **onchain_data}
                         
-                        # AI decision making
-                        trade_decision = await self.ai_trader.should_trade(combined_data)
+                        # 🧠 NEW: Self-Learning AI Decision System
+                        # Start price tracking for automatic labeling (ALL tokens)
+                        await self.self_learning_trader.start_price_tracking(combined_data)
                         
-                        if trade_decision['should_trade']:
-                            logger.info(f"🎯 Trading opportunity: {token['symbol']} - Score: {trade_decision['confidence']:.2f}")
+                        # Get ML-based trading decision (only trained model)
+                        ml_decision = await self.self_learning_trader.predict_token_score(combined_data)
+                        
+                        if ml_decision['should_trade']:
+                            logger.info(f"🤖 ML Trading opportunity: {token['symbol']} - ML Score: {ml_decision['confidence']:.2f}")
                             
                             # Log AI trade execution decision
                             ai_trader_logger.trade_execution(
                                 action='buy',
                                 token_address=token['address'],
-                                amount=trade_decision['amount'],
-                                ai_confidence=trade_decision['confidence'],
-                                reasoning=trade_decision['reasoning'].split(';') if isinstance(trade_decision['reasoning'], str) else [str(trade_decision['reasoning'])],
-                                expected_outcome='profitable' if trade_decision['confidence'] > 0.7 else 'uncertain'
+                                amount=0.01,  # Fixed 1% position size for now
+                                ai_confidence=ml_decision['confidence'],
+                                reasoning=[ml_decision['reason']],
+                                expected_outcome='profitable' if ml_decision['confidence'] > 0.8 else 'uncertain'
                             )
                             
                             if self.real_mode:
                                 # Execute real trade
                                 trade_result = await self.wallet_manager.execute_trade(
                                     token_address=token['address'],
-                                    amount_sol=trade_decision['amount'],
+                                    amount_sol=0.01,  # Fixed 1% position
                                     action='buy'
                                 )
                             else:
                                 # Paper trade
                                 trade_result = {
                                     'success': True,
-                                    'amount': trade_decision['amount'],
-                                    'price': token['price'],
+                                    'amount': 0.01,
+                                    'price': token.get('price_usd', 0),
                                     'type': 'paper'
                                 }
                             
                             # Log trade
-                            self.trading_logger.log_trade(token, trade_result, trade_decision)
+                            self.trading_logger.log_trade(token, trade_result, ml_decision)
                             
-                            # Update AI model with result (for learning)
-                            await self.ai_trader.update_model(combined_data, trade_result)
+                            # Note: No manual model update needed - the self-learning system
+                            # automatically learns from price movements via price tracking!
                             
                             # Update stats
                             self.total_trades += 1
@@ -484,6 +546,8 @@ async def main():
         application.add_handler(CommandHandler("backtest", bot.backtest_command))
         application.add_handler(CommandHandler("logs", bot.logs_command))
         application.add_handler(CommandHandler("dump", bot.dump_command))
+        application.add_handler(CommandHandler("mlstats", bot.ml_stats_command))
+        application.add_handler(CommandHandler("retrain", bot.retrain_command))
         
         # Setup scheduler
         bot.setup_scheduler()
