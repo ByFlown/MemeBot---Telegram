@@ -261,7 +261,11 @@ class SelfLearningTrader:
             current_price = await self.get_current_price(token_address)
             
             if current_price is None or current_price <= 0:
-                logger.warning(f"Could not get current price for {token_address}")
+                logger.warning(f"Could not get current price for {token_address[:8]}... - labeling as 'neutral'")
+                # Still create a label even if price fetch fails
+                self.update_training_sample_label(token_address, 0.0, "neutral")
+                if token_address in self.price_tracker:
+                    del self.price_tracker[token_address]
                 return
             
             # Calculate price change
@@ -278,8 +282,20 @@ class SelfLearningTrader:
             # Update database with label
             self.update_training_sample_label(token_address, price_change, label)
             
-            # Remove from tracker
-            del self.price_tracker[token_address]
+            # Remove from tracker and clean up memory
+            if token_address in self.price_tracker:
+                del self.price_tracker[token_address]
+            
+            # Clean up expired tracking entries to prevent memory leaks
+            current_time = datetime.now()
+            expired_tokens = []
+            for addr, info in self.price_tracker.items():
+                if (current_time - info['entry_time']).total_seconds() > 25 * 60:  # 25min cleanup
+                    expired_tokens.append(addr)
+            
+            for addr in expired_tokens:
+                del self.price_tracker[addr]
+                logger.debug(f"Cleaned up expired tracking for {addr[:8]}...")
             
             # Log automatic labeling
             ml_logger.learning(
@@ -446,7 +462,7 @@ class SelfLearningTrader:
                 logger.info("Not enough samples for training")
                 return
             
-            # Scale features
+            # Scale features (maintain feature names for consistency)
             X_scaled = self.scaler.fit_transform(X)
             
             # Split data  
@@ -582,7 +598,7 @@ class SelfLearningTrader:
                     'reason': 'Could not extract features'
                 }
             
-            # Prepare feature vector
+            # Prepare feature vector as DataFrame to preserve feature names
             feature_columns = [
                 'price_usd', 'volume_24h', 'volume_5m', 'liquidity_usd', 'market_cap',
                 'age_minutes', 'price_change_24h', 'volume_change_24h',
@@ -591,11 +607,12 @@ class SelfLearningTrader:
                 'has_social_links', 'liquidity_score', 'volume_score', 'momentum_score'
             ]
             
-            feature_vector = [features.get(col, 0) for col in feature_columns]
-            feature_vector = np.array(feature_vector).reshape(1, -1)
+            # Create DataFrame with feature names to avoid sklearn warning
+            feature_data = {col: [features.get(col, 0)] for col in feature_columns}
+            feature_df = pd.DataFrame(feature_data)
             
-            # Scale features
-            feature_vector_scaled = self.scaler.transform(feature_vector)
+            # Scale features (now with consistent feature names)
+            feature_vector_scaled = self.scaler.transform(feature_df)
             
             # Get prediction probabilities
             probabilities = self.model.predict_proba(feature_vector_scaled)[0]
