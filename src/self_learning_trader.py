@@ -16,11 +16,11 @@ from typing import Dict, List, Optional, Tuple
 from pathlib import Path
 
 # ML Libraries
-from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
 from sklearn.model_selection import train_test_split, cross_val_score
 from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import classification_report, accuracy_score
-from sklearn.linear_model import SGDClassifier
+from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
+from sklearn.linear_model import SGDRegressor
 import joblib
 
 from .ai_logger import get_ai_logger
@@ -43,16 +43,26 @@ class SelfLearningTrader:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.model_dir.mkdir(parents=True, exist_ok=True)
         
-        # ML Configuration
-        self.learning_window_minutes = 20  # Preis nach X Minuten prüfen
-        self.profit_threshold_good = 0.10   # +10% = "good"
-        self.loss_threshold_bad = -0.10     # -10% = "bad"
+        # Profit-Based Learning Configuration (no fixed timeframes)
+        self.min_trade_amount = 0.01  # Minimum SOL amount per trade
+        self.max_position_age_hours = 48  # Maximum holding period before forced exit
+        self.min_profit_threshold = 0.02  # Minimum 2% profit to consider successful
+        self.stop_loss_threshold = -0.15  # Stop loss at -15%
         
-        # Models
+        # Models - Now using regressors for reward-based learning
         self.model = None
         self.scaler = StandardScaler()
-        self.online_model = SGDClassifier(random_state=42)  # Für Online-Learning
+        self.online_model = SGDRegressor(random_state=42)
         self.is_trained = False
+        
+        # Profit-based learning configuration
+        self.trade_confidence_threshold = 0.6  # Minimum confidence to execute trade
+        self.profit_scaling_factor = 10.0  # Scale profits for reward calculation
+        
+        # Active position tracking for profit calculation
+        self.active_positions = {}  # {token_address: {entry_data, features, ml_prediction}}
+        self.completed_trades = []  # List of completed trades with profits/losses
+        self.position_monitor_task = None  # Background task for monitoring positions
         
         # Database for training data
         self.db_path = self.data_dir / "training_data.db"
@@ -66,6 +76,9 @@ class SelfLearningTrader:
         
         # Flag for initial data generation
         self._initial_data_generated = False
+        
+        # Start position monitoring
+        self.start_position_monitoring()
     
     def init_database(self):
         """Initialize SQLite database for training data"""
@@ -110,13 +123,22 @@ class SelfLearningTrader:
                 volume_score REAL,
                 momentum_score REAL,
                 
-                -- Label (Generated automatically)
-                price_change_after_20min REAL,
-                label TEXT,  -- 'good', 'bad', 'neutral'
+                -- Profit-based learning data
+                ml_confidence REAL,     -- ML confidence score (0-1)
+                entry_price REAL,       -- Price when position opened
+                exit_price REAL,        -- Price when position closed
+                position_size REAL,     -- SOL amount invested
+                profit_loss REAL,       -- Actual profit/loss in SOL
+                profit_percentage REAL, -- Profit/loss as percentage
+                holding_duration_minutes INTEGER, -- How long position was held
+                exit_reason TEXT,       -- Why position was closed
+                reward_score REAL,      -- Calculated reward based on profit
+                entry_timestamp DATETIME,
+                exit_timestamp DATETIME,
                 
                 -- Metadata
-                labeled INTEGER DEFAULT 0,
-                trade_simulated INTEGER DEFAULT 0
+                position_closed INTEGER DEFAULT 0,
+                trade_executed INTEGER DEFAULT 0
             )
         """)
         
@@ -193,132 +215,207 @@ class SelfLearningTrader:
             logger.error(f"Error extracting features: {e}")
             return {}
     
-    async def start_price_tracking(self, token_data: Dict):
+    async def open_position(self, token_data: Dict, ml_confidence: float, position_size: float = None) -> bool:
         """
-        📊 Startet Preis-Tracking für automatisches Labeling
-        Speichert Token-Daten und startet Timer für spätere Label-Generierung
+        💰 Opens a trading position based on ML prediction
+        Core of the new profit-based system
         """
         try:
             token_address = token_data.get('address')
             if not token_address:
-                return
+                return False
             
             # Extract features
             features = self.extract_features(token_data)
             if not features:
-                return
+                return False
             
-            # Store tracking info
-            self.price_tracker[token_address] = {
+            # Determine position size (default to minimum)
+            if position_size is None:
+                position_size = self.min_trade_amount
+            
+            # Store active position
+            self.active_positions[token_address] = {
                 'entry_time': datetime.now(),
                 'entry_price': features['price_usd'],
+                'position_size': position_size,
+                'ml_confidence': ml_confidence,
                 'features': features,
                 'token_data': token_data
             }
             
-            # Save to database (unlabeled)
-            self.save_training_sample(token_address, features, label_price_change=None)
-            
-            # Schedule labeling after learning_window_minutes
-            asyncio.create_task(self.schedule_labeling(token_address))
+            # Save to database
+            self.save_position_entry(token_address, features, ml_confidence, position_size)
             
             ml_logger.analysis(
-                f"Started price tracking for automatic labeling",
+                f"Position opened",
                 token_address=token_address,
                 analysis_data={
+                    'ml_confidence': ml_confidence,
                     'entry_price': features['price_usd'],
-                    'tracking_duration_minutes': self.learning_window_minutes
+                    'position_size': position_size
                 }
             )
             
-        except Exception as e:
-            logger.error(f"Error starting price tracking: {e}")
-    
-    async def schedule_labeling(self, token_address: str):
-        """
-        ⏰ Wartet X Minuten und generiert dann automatisch Labels
-        """
-        try:
-            # Wait for learning window
-            await asyncio.sleep(self.learning_window_minutes * 60)
-            
-            # Generate label
-            await self.generate_automatic_label(token_address)
+            return True
             
         except Exception as e:
-            logger.error(f"Error in scheduled labeling for {token_address}: {e}")
+            logger.error(f"Error opening position: {e}")
+            return False
     
-    async def generate_automatic_label(self, token_address: str):
+    def start_position_monitoring(self):
         """
-        🏷️ Generiert automatisch Labels durch Preisverfolgung
-        KERN-FEATURE: Hier entstehen die Trainings-Labels!
+        🔍 Starts background task to monitor all active positions
+        """
+        if self.position_monitor_task is None or self.position_monitor_task.done():
+            self.position_monitor_task = asyncio.create_task(self.monitor_positions_continuously())
+            logger.info("Started position monitoring task")
+    
+    async def monitor_positions_continuously(self):
+        """
+        🔄 Continuously monitors all active positions for exit conditions
+        """
+        while True:
+            try:
+                await asyncio.sleep(30)  # Check every 30 seconds
+                
+                if not self.active_positions:
+                    continue
+                
+                positions_to_close = []
+                current_time = datetime.now()
+                
+                for token_address, position in list(self.active_positions.items()):
+                    try:
+                        # Get current price
+                        current_price = await self.get_current_price(token_address)
+                        if current_price is None or current_price <= 0:
+                            continue
+                        
+                        entry_price = position['entry_price']
+                        profit_pct = (current_price - entry_price) / entry_price
+                        position_age = (current_time - position['entry_time']).total_seconds() / 3600
+                        
+                        # Check exit conditions
+                        should_exit, exit_reason = self.should_exit_position(
+                            profit_pct, position_age, position['ml_confidence']
+                        )
+                        
+                        if should_exit:
+                            positions_to_close.append((token_address, current_price, exit_reason))
+                    
+                    except Exception as e:
+                        logger.error(f"Error monitoring position {token_address}: {e}")
+                        continue
+                
+                # Close positions that meet exit criteria
+                for token_address, exit_price, exit_reason in positions_to_close:
+                    await self.close_position(token_address, exit_price, exit_reason)
+                
+            except Exception as e:
+                logger.error(f"Error in position monitoring: {e}")
+                await asyncio.sleep(60)  # Wait longer on error
+    
+    def should_exit_position(self, profit_pct: float, position_age_hours: float, ml_confidence: float) -> tuple[bool, str]:
+        """
+        ⚙️ Determines if a position should be closed based on various factors
+        The ML system learns to optimize these exit conditions over time
+        """
+        # Stop loss condition
+        if profit_pct <= self.stop_loss_threshold:
+            return True, "stop_loss"
+        
+        # Maximum holding period
+        if position_age_hours >= self.max_position_age_hours:
+            return True, "max_age"
+        
+        # Profit taking based on confidence and current profit
+        # High confidence trades can hold longer for bigger gains
+        if ml_confidence > 0.8 and profit_pct > 0.15:  # 15%+ profit with high confidence
+            return True, "profit_target_high_confidence"
+        elif ml_confidence > 0.6 and profit_pct > 0.10:  # 10%+ profit with medium confidence
+            return True, "profit_target_medium_confidence"
+        elif ml_confidence <= 0.6 and profit_pct > 0.05:  # 5%+ profit with low confidence
+            return True, "profit_target_low_confidence"
+        
+        # Time-based exit for low confidence trades
+        if ml_confidence < 0.7 and position_age_hours > 4 and profit_pct > 0:
+            return True, "time_exit_low_confidence"
+        
+        return False, ""
+    
+    async def close_position(self, token_address: str, exit_price: float, exit_reason: str):
+        """
+        💰 Closes a position and calculates profit-based reward
+        CORE FEATURE: This is where the system learns from actual trading profits!
         """
         try:
-            if token_address not in self.price_tracker:
+            if token_address not in self.active_positions:
                 return
             
-            tracking_info = self.price_tracker[token_address]
-            entry_price = tracking_info['entry_price']
+            position = self.active_positions[token_address]
+            entry_price = position['entry_price']
+            position_size = position['position_size']
+            ml_confidence = position['ml_confidence']
+            entry_time = position['entry_time']
             
-            # Get current price (re-query DexScreener)
-            current_price = await self.get_current_price(token_address)
+            # Calculate profit/loss
+            profit_pct = (exit_price - entry_price) / entry_price
+            profit_sol = position_size * profit_pct
+            holding_duration = (datetime.now() - entry_time).total_seconds() / 60  # minutes
             
-            if current_price is None or current_price <= 0:
-                logger.warning(f"Could not get current price for {token_address[:8]}... - labeling as 'neutral'")
-                # Still create a label even if price fetch fails
-                self.update_training_sample_label(token_address, 0.0, "neutral")
-                if token_address in self.price_tracker:
-                    del self.price_tracker[token_address]
-                return
+            # Calculate reward based on actual profit
+            reward = self.calculate_profit_reward(profit_pct, profit_sol, holding_duration, ml_confidence, exit_reason)
             
-            # Calculate price change
-            price_change = (current_price - entry_price) / entry_price
+            # Update database with trade results
+            self.update_position_with_results(
+                token_address, exit_price, profit_pct, profit_sol, 
+                holding_duration, exit_reason, reward
+            )
             
-            # Generate label based on performance
-            if price_change >= self.profit_threshold_good:
-                label = "good"
-            elif price_change <= self.loss_threshold_bad:
-                label = "bad"
-            else:
-                label = "neutral"
+            # Store in completed trades for statistics
+            self.completed_trades.append({
+                'token_address': token_address[:8] + "...",
+                'entry_price': entry_price,
+                'exit_price': exit_price,
+                'profit_pct': profit_pct,
+                'profit_sol': profit_sol,
+                'ml_confidence': ml_confidence,
+                'holding_duration': holding_duration,
+                'exit_reason': exit_reason,
+                'reward': reward,
+                'timestamp': datetime.now()
+            })
             
-            # Update database with label
-            self.update_training_sample_label(token_address, price_change, label)
+            # Keep only last 1000 trades in memory
+            if len(self.completed_trades) > 1000:
+                self.completed_trades = self.completed_trades[-1000:]
             
-            # Remove from tracker and clean up memory
-            if token_address in self.price_tracker:
-                del self.price_tracker[token_address]
+            # Remove from active positions
+            del self.active_positions[token_address]
             
-            # Clean up expired tracking entries to prevent memory leaks
-            current_time = datetime.now()
-            expired_tokens = []
-            for addr, info in self.price_tracker.items():
-                if (current_time - info['entry_time']).total_seconds() > 25 * 60:  # 25min cleanup
-                    expired_tokens.append(addr)
-            
-            for addr in expired_tokens:
-                del self.price_tracker[addr]
-                logger.debug(f"Cleaned up expired tracking for {addr[:8]}...")
-            
-            # Log automatic labeling
+            # Log trade completion
             ml_logger.learning(
-                f"Automatic label generated: {label}",
+                f"Position closed: {exit_reason}",
                 learning_data={
                     'token': token_address[:8] + "...",
-                    'entry_price': entry_price,
-                    'current_price': current_price,
-                    'price_change_pct': price_change * 100,
-                    'label': label,
-                    'tracking_duration_min': self.learning_window_minutes
+                    'profit_pct': profit_pct * 100,
+                    'profit_sol': profit_sol,
+                    'ml_confidence': ml_confidence,
+                    'holding_duration_min': holding_duration,
+                    'exit_reason': exit_reason
                 },
-                reward=price_change
+                reward=reward
             )
+            
+            # Learn from this trade (online learning)
+            await self.update_model_with_profit(position['features'], profit_pct, reward)
             
             # Trigger model retraining if enough new data
             await self.check_retrain_trigger()
             
         except Exception as e:
-            logger.error(f"Error generating automatic label: {e}")
+            logger.error(f"Error closing position: {e}")
     
     async def get_current_price(self, token_address: str) -> Optional[float]:
         """
@@ -347,9 +444,93 @@ class SelfLearningTrader:
             logger.error(f"Error getting current price for {token_address}: {e}")
             return None
     
-    def save_training_sample(self, token_address: str, features: Dict, label_price_change: Optional[float] = None):
+    def calculate_profit_reward(self, profit_pct: float, profit_sol: float, holding_duration: float, 
+                               ml_confidence: float, exit_reason: str) -> float:
         """
-        💾 Speichert Training-Sample in Datenbank
+        🏆 Calculates reward score based on actual trading profit
+        Higher rewards for profitable trades, scaled by confidence and efficiency
+        """
+        try:
+            # Base reward from profit percentage (main component)
+            base_reward = profit_pct * self.profit_scaling_factor
+            
+            # Confidence multiplier - reward confident successful trades more
+            if profit_pct > 0:
+                confidence_multiplier = 1.0 + (ml_confidence - 0.5)  # 0.5-1.5x multiplier
+            else:
+                confidence_multiplier = 1.0 - (ml_confidence - 0.5)  # Penalize confident losses more
+            
+            # Time efficiency bonus - reward faster profitable trades
+            time_bonus = 0.0
+            if profit_pct > 0:
+                # Bonus for making profit quickly (inversely proportional to time)
+                hours = holding_duration / 60
+                if hours > 0:
+                    time_bonus = min(0.3, 1.0 / hours)  # Max 30% bonus
+            
+            # Exit reason modifiers
+            exit_modifiers = {
+                'profit_target_high_confidence': 0.2,    # Bonus for systematic profit taking
+                'profit_target_medium_confidence': 0.1,
+                'profit_target_low_confidence': 0.05,
+                'stop_loss': -0.1,                       # Small penalty for stop losses
+                'max_age': -0.05,                        # Small penalty for holding too long
+                'time_exit_low_confidence': 0.0          # Neutral for time-based exits
+            }
+            
+            exit_modifier = exit_modifiers.get(exit_reason, 0.0)
+            
+            # Calculate final reward
+            total_reward = (base_reward * confidence_multiplier) + time_bonus + exit_modifier
+            
+            # Clamp reward between -2.0 and 2.0 to allow for strong signals
+            return max(-2.0, min(2.0, total_reward))
+            
+        except Exception as e:
+            logger.error(f"Error calculating profit reward: {e}")
+            return 0.0
+    
+    async def update_model_with_profit(self, features: Dict, profit_pct: float, reward: float):
+        """
+        🧠 Updates the online learning model with profit-based feedback
+        """
+        try:
+            if not hasattr(self.online_model, 'coef_'):
+                # Model not initialized yet, skip online learning
+                return
+            
+            # Prepare feature vector
+            feature_columns = [
+                'price_usd', 'volume_24h', 'volume_5m', 'liquidity_usd', 'market_cap',
+                'age_minutes', 'price_change_24h', 'volume_change_24h',
+                'holder_count', 'top_10_percentage', 'whale_wallets',
+                'risk_score', 'confidence_score', 'is_honeypot', 'liq_locked', 
+                'has_social_links', 'liquidity_score', 'volume_score', 'momentum_score'
+            ]
+            
+            feature_data = {col: [features.get(col, 0)] for col in feature_columns}
+            feature_df = pd.DataFrame(feature_data)
+            feature_vector_scaled = self.scaler.transform(feature_df)
+            
+            # Use profit percentage as target for online learning
+            # Weight the learning by reward magnitude (profitable trades get more weight)
+            sample_weight = max(0.1, abs(reward))  # Minimum weight of 0.1
+            
+            # Update online model
+            self.online_model.partial_fit(
+                feature_vector_scaled, 
+                [profit_pct],
+                sample_weight=[sample_weight]
+            )
+            
+            logger.debug(f"Online model updated with profit {profit_pct:.3f} and reward {reward:.3f}")
+            
+        except Exception as e:
+            logger.error(f"Error updating model with profit: {e}")
+    
+    def save_position_entry(self, token_address: str, features: Dict, ml_confidence: float, position_size: float):
+        """
+        💾 Saves position entry to database for profit-based learning
         """
         try:
             conn = sqlite3.connect(self.db_path)
@@ -363,8 +544,8 @@ class SelfLearningTrader:
                     holder_count, top_10_percentage, whale_wallets,
                     risk_score, confidence_score, is_honeypot, liq_locked, has_social_links,
                     liquidity_score, volume_score, momentum_score,
-                    price_change_after_20min, labeled
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ml_confidence, entry_price, position_size, entry_timestamp, position_closed, trade_executed
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 token_address, datetime.now(),
                 features.get('price_usd', 0), features.get('volume_24h', 0), features.get('volume_5m', 0),
@@ -374,18 +555,19 @@ class SelfLearningTrader:
                 features.get('risk_score', 5.0), features.get('confidence_score', 5.0),
                 features.get('is_honeypot', 0), features.get('liq_locked', 0), features.get('has_social_links', 0),
                 features.get('liquidity_score', 0), features.get('volume_score', 0), features.get('momentum_score', 0),
-                label_price_change, 1 if label_price_change is not None else 0
+                ml_confidence, features.get('price_usd', 0), position_size, datetime.now(), 0, 1
             ))
             
             conn.commit()
             conn.close()
             
         except Exception as e:
-            logger.error(f"Error saving training sample: {e}")
+            logger.error(f"Error saving position entry: {e}")
     
-    def update_training_sample_label(self, token_address: str, price_change: float, label: str):
+    def update_position_with_results(self, token_address: str, exit_price: float, profit_pct: float, 
+                                   profit_sol: float, holding_duration: float, exit_reason: str, reward: float):
         """
-        🏷️ Aktualisiert Training-Sample mit generiertem Label
+        🏆 Updates position with trading results and profit-based reward
         """
         try:
             conn = sqlite3.connect(self.db_path)
@@ -393,47 +575,49 @@ class SelfLearningTrader:
             
             cursor.execute("""
                 UPDATE training_data 
-                SET price_change_after_20min = ?, label = ?, labeled = 1
-                WHERE token_address = ? AND labeled = 0
-            """, (price_change, label, token_address))
+                SET exit_price = ?, profit_loss = ?, profit_percentage = ?, 
+                    holding_duration_minutes = ?, exit_reason = ?, reward_score = ?, 
+                    exit_timestamp = ?, position_closed = 1
+                WHERE token_address = ? AND position_closed = 0
+            """, (exit_price, profit_sol, profit_pct, holding_duration, exit_reason, reward, datetime.now(), token_address))
             
             conn.commit()
             conn.close()
             
         except Exception as e:
-            logger.error(f"Error updating training sample label: {e}")
+            logger.error(f"Error updating position with results: {e}")
     
     async def check_retrain_trigger(self):
         """
-        🔄 Prüft ob Modell neu trainiert werden soll
+        🔄 Checks if model should be retrained based on completed trades
         """
         try:
-            labeled_count = self.get_labeled_sample_count()
+            completed_count = self.get_completed_trades_count()
             
-            # Retrain every 50 new labeled samples
-            if labeled_count > 0 and labeled_count % 50 == 0:
-                logger.info(f"Triggering model retraining with {labeled_count} samples")
+            # Retrain every 25 new completed trades (more frequent due to profit importance)
+            if completed_count > 0 and completed_count % 25 == 0:
+                logger.info(f"Triggering model retraining with {completed_count} completed trades")
                 await self.train_model()
             
         except Exception as e:
             logger.error(f"Error checking retrain trigger: {e}")
     
-    def get_labeled_sample_count(self) -> int:
+    def get_completed_trades_count(self) -> int:
         """
-        📊 Anzahl der gelabelten Training-Samples
+        📊 Number of completed trades with profit data
         """
         try:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
             
-            cursor.execute("SELECT COUNT(*) FROM training_data WHERE labeled = 1")
+            cursor.execute("SELECT COUNT(*) FROM training_data WHERE position_closed = 1")
             count = cursor.fetchone()[0]
             
             conn.close()
             return count
             
         except Exception as e:
-            logger.error(f"Error getting labeled sample count: {e}")
+            logger.error(f"Error getting completed trades count: {e}")
             return 0
     
     async def train_model(self, use_initial_split=False):
@@ -572,13 +756,146 @@ class SelfLearningTrader:
         """
         try:
             conn = sqlite3.connect(self.db_path)
-            df = pd.read_sql_query("SELECT * FROM training_data WHERE labeled = 1", conn)
+            df = pd.read_sql_query("SELECT * FROM training_data WHERE position_closed = 1", conn)
             conn.close()
             return df
             
         except Exception as e:
             logger.error(f"Error loading training data: {e}")
             return pd.DataFrame()
+    
+    async def train_model(self, use_initial_split=False):
+        """
+        🧠 Trains ML model with profit-based data from completed trades
+        CORE FUNCTION: This is where the system learns from trading profits!
+        """
+        try:
+            # Load training data
+            df = self.load_training_data()
+            
+            if df.empty or len(df) < 10:
+                logger.info("Not enough trading data for model training")
+                return
+            
+            # Prepare features and targets for profit-based regression
+            feature_columns = [
+                'price_usd', 'volume_24h', 'volume_5m', 'liquidity_usd', 'market_cap',
+                'age_minutes', 'price_change_24h', 'volume_change_24h',
+                'holder_count', 'top_10_percentage', 'whale_wallets',
+                'risk_score', 'confidence_score', 'is_honeypot', 'liq_locked', 
+                'has_social_links', 'liquidity_score', 'volume_score', 'momentum_score'
+            ]
+            
+            X = df[feature_columns].fillna(0)
+            y = df['profit_percentage'].fillna(0)  # Use actual profit percentages as targets
+            sample_weights = df['reward_score'].fillna(0.1).abs() + 0.1  # Weight by reward
+            
+            if len(X) < 10:
+                logger.info("Not enough samples for training")
+                return
+            
+            # Scale features (maintain feature names for consistency)
+            X_scaled = self.scaler.fit_transform(X)
+            
+            # Split data (80/20 for initial training, 0.2 for regular retraining)
+            test_size = 0.2
+            X_train, X_test, y_train, y_test, w_train, w_test = train_test_split(
+                X_scaled, y, sample_weights, test_size=test_size, random_state=42
+            )
+            
+            # Train multiple regression models and choose best
+            models = {
+                'random_forest': RandomForestRegressor(n_estimators=100, random_state=42),
+                'gradient_boosting': GradientBoostingRegressor(random_state=42, learning_rate=0.1, max_depth=6)
+            }
+            
+            best_model = None
+            best_score = float('-inf')  # Use negative infinity for R²
+            best_name = ""
+            best_test_results = {}
+            
+            for name, model in models.items():
+                try:
+                    # Fit model with sample weights
+                    model.fit(X_train, y_train, sample_weight=w_train)
+                    
+                    # Score using R² for regression
+                    score = model.score(X_test, y_test, sample_weight=w_test)
+                    
+                    if score > best_score:
+                        best_score = score
+                        best_model = model
+                        best_name = name
+                        
+                        # Calculate detailed test results for the best model
+                        y_pred = model.predict(X_test)
+                        
+                        best_test_results = {
+                            'r2_score': score,
+                            'mse': mean_squared_error(y_test, y_pred, sample_weight=w_test),
+                            'mae': mean_absolute_error(y_test, y_pred, sample_weight=w_test),
+                            'training_samples': len(X_train),
+                            'test_samples': len(X_test),
+                            'mean_profit_pct': y.mean(),
+                            'std_profit_pct': y.std()
+                        }
+                        
+                except Exception as e:
+                    logger.warning(f"Error training {name}: {e}")
+                    continue
+            
+            if best_model is None:
+                logger.error("No model could be trained successfully")
+                return best_test_results
+            
+            # Update main model
+            old_performance = self.get_model_performance() if self.is_trained else 0
+            self.model = best_model
+            self.is_trained = True
+            
+            # Train online learning model for live updates (regression)
+            try:
+                self.online_model.partial_fit(X_train, y_train, sample_weight=w_train)
+            except Exception as e:
+                logger.warning(f"Error training online model: {e}")
+            
+            # Save models
+            self.save_models()
+            
+            # Log training results
+            training_log_msg = (
+                f"🧠 **Profit-Based ML Training Results**\\n"
+                f"Model Type: {best_name}\\n"
+                f"Training Samples: {len(X_train)} (80%)\\n"
+                f"Test Samples: {len(X_test)} (20%)\\n"
+                f"R² Score: {best_test_results['r2_score']:.3f}\\n"
+                f"MSE: {best_test_results['mse']:.4f}\\n"
+                f"MAE: {best_test_results['mae']:.4f}\\n"
+                f"Mean Profit: {best_test_results['mean_profit_pct']:.2%}\\n"
+                f"Profit Std: {best_test_results['std_profit_pct']:.2%}"
+            )
+            
+            logger.info(training_log_msg)
+            print(training_log_msg)  # Also print to console
+            
+            ml_logger.model_update(
+                model_name=f"ProfitBasedTrader_{best_name}",
+                update_type="full_retrain" if use_initial_split else "incremental_retrain",
+                performance_before=old_performance,
+                performance_after=best_score,
+                update_details=best_test_results
+            )
+            
+            return best_test_results
+            
+        except Exception as e:
+            logger.error(f"Error training model: {e}")
+            ml_logger.error(
+                "Model training failed",
+                error_details={'error': str(e)},
+                recovery_action="Continuing with existing model if available"
+            )
+            return {}
     
     def get_model_performance(self) -> float:
         """
@@ -603,7 +920,7 @@ class SelfLearningTrader:
             logger.error(f"Error calculating model performance: {e}")
             return 0.0
     
-    async def predict_token_score(self, token_data: Dict) -> Dict:
+    async def predict_token_return(self, token_data: Dict) -> Dict:
         """
         🎯 Scored neuen Token mit ML-Modell
         HAUPTFUNKTION: Hier entscheidet das System autonom!
@@ -753,60 +1070,135 @@ class SelfLearningTrader:
     
     def get_training_stats(self) -> Dict:
         """
-        📊 Statistiken über das Training
+        📊 Statistics about the profit-based trading system
         """
         try:
             conn = sqlite3.connect(self.db_path)
-            
-            # Basic stats
             cursor = conn.cursor()
+            
+            # Basic trading stats
             cursor.execute("SELECT COUNT(*) FROM training_data")
-            total_samples = cursor.fetchone()[0]
+            total_positions = cursor.fetchone()[0]
             
-            cursor.execute("SELECT COUNT(*) FROM training_data WHERE labeled = 1")
-            labeled_samples = cursor.fetchone()[0]
+            cursor.execute("SELECT COUNT(*) FROM training_data WHERE position_closed = 1")
+            completed_trades = cursor.fetchone()[0]
             
-            # Label distribution
-            cursor.execute("SELECT label, COUNT(*) FROM training_data WHERE labeled = 1 GROUP BY label")
-            label_dist = dict(cursor.fetchall())
+            cursor.execute("SELECT COUNT(*) FROM training_data WHERE position_closed = 0")
+            active_positions = cursor.fetchone()[0]
             
-            # Recent performance
+            # Profit statistics
             cursor.execute("""
-                SELECT AVG(price_change_after_20min) 
+                SELECT AVG(profit_percentage), MIN(profit_percentage), MAX(profit_percentage),
+                       SUM(profit_loss), AVG(reward_score)
                 FROM training_data 
-                WHERE labeled = 1 AND timestamp > datetime('now', '-7 days')
+                WHERE position_closed = 1 AND profit_percentage IS NOT NULL
             """)
-            recent_avg_return = cursor.fetchone()[0] or 0
+            profit_stats = cursor.fetchone()
+            avg_profit_pct, min_profit_pct, max_profit_pct, total_profit_sol, avg_reward = (
+                profit_stats if profit_stats[0] is not None else (0, 0, 0, 0, 0)
+            )
             
-            # Model performance metrics (if available)
-            model_performance = {}
-            if self.is_trained:
-                try:
-                    # Get recent model accuracy from logs or calculate from recent predictions
-                    cursor.execute("""
-                        SELECT AVG(CASE WHEN label = 'good' THEN 1 ELSE 0 END) as good_ratio
-                        FROM training_data 
-                        WHERE labeled = 1 AND timestamp > datetime('now', '-7 days')
-                    """)
-                    good_ratio = cursor.fetchone()[0] or 0
-                    
-                    model_performance = {
-                        'recent_good_ratio': good_ratio,
-                        'model_type': type(self.model).__name__ if self.model else 'Unknown',
-                        'features_count': 19  # Number of features used
-                    }
-                except Exception as e:
-                    logger.debug(f"Could not calculate model performance: {e}")
+            # Trading performance (last 7 days)
+            cursor.execute("""
+                SELECT AVG(profit_percentage) as avg_profit,
+                       COUNT(*) as trade_count,
+                       SUM(CASE WHEN profit_percentage > 0 THEN 1 ELSE 0 END) as profitable_trades,
+                       AVG(holding_duration_minutes) as avg_duration
+                FROM training_data 
+                WHERE position_closed = 1 
+                AND exit_timestamp > datetime('now', '-7 days')
+            """)
+            recent_stats = cursor.fetchone()
+            recent_avg_profit, recent_trades, profitable_trades, avg_duration = (
+                recent_stats if recent_stats[0] is not None else (0, 0, 0, 0)
+            )
+            
+            # Exit reason analysis
+            cursor.execute("""
+                SELECT exit_reason, COUNT(*) as count
+                FROM training_data 
+                WHERE position_closed = 1 AND exit_reason IS NOT NULL
+                AND exit_timestamp > datetime('now', '-7 days')
+                GROUP BY exit_reason
+            """)
+            exit_reasons = dict(cursor.fetchall())
+            
+            # Confidence analysis
+            cursor.execute("""
+                SELECT AVG(ml_confidence) as avg_confidence,
+                       AVG(CASE WHEN profit_percentage > 0 THEN ml_confidence ELSE NULL END) as avg_confidence_profitable,
+                       AVG(CASE WHEN profit_percentage <= 0 THEN ml_confidence ELSE NULL END) as avg_confidence_losses
+                FROM training_data 
+                WHERE position_closed = 1 AND ml_confidence IS NOT NULL
+                AND exit_timestamp > datetime('now', '-7 days')
+            """)
+            confidence_stats = cursor.fetchone()
+            avg_confidence, avg_confidence_profit, avg_confidence_loss = (
+                confidence_stats if confidence_stats[0] is not None else (0, 0, 0)
+            )
             
             conn.close()
             
+            # Calculate win rate
+            win_rate = (profitable_trades / recent_trades * 100) if recent_trades > 0 else 0
+            
+            # Get in-memory trading statistics
+            trading_history_stats = {}
+            if self.completed_trades:
+                recent_trades = self.completed_trades[-25:]  # Last 25 trades
+                trading_history_stats = {
+                    'recent_trades_count': len(recent_trades),
+                    'avg_recent_profit': sum(t['profit_pct'] for t in recent_trades) / len(recent_trades),
+                    'avg_recent_reward': sum(t['reward'] for t in recent_trades) / len(recent_trades),
+                    'avg_recent_duration': sum(t['holding_duration'] for t in recent_trades) / len(recent_trades)
+                }
+            
+            # Model performance metrics
+            model_performance = {}
+            if self.is_trained:
+                model_performance = {
+                    'model_type': type(self.model).__name__ if self.model else 'Unknown',
+                    'features_count': 19,
+                    'profit_threshold': self.min_profit_threshold,
+                    'confidence_threshold': self.trade_confidence_threshold,
+                    'max_position_age_hours': self.max_position_age_hours,
+                    'stop_loss_threshold': self.stop_loss_threshold,
+                    'online_learning_enabled': hasattr(self.online_model, 'coef_'),
+                    'current_performance_score': self.get_model_performance()
+                }
+            
             return {
-                'total_samples': total_samples,
-                'labeled_samples': labeled_samples,
-                'label_distribution': label_dist,
-                'recent_avg_return_7d': recent_avg_return,
+                'total_positions': total_positions,
+                'completed_trades': completed_trades,
+                'active_positions': active_positions,
                 'model_trained': self.is_trained,
-                'learning_window_minutes': self.learning_window_minutes,
+                
+                # Profit statistics (all time)
+                'avg_profit_pct': avg_profit_pct,
+                'min_profit_pct': min_profit_pct,
+                'max_profit_pct': max_profit_pct,
+                'total_profit_sol': total_profit_sol,
+                'avg_reward_score': avg_reward,
+                
+                # Performance statistics (last 7 days)
+                'recent_avg_profit_pct': recent_avg_profit,
+                'recent_trade_count': recent_trades,
+                'profitable_trades_7d': profitable_trades,
+                'win_rate_pct': win_rate,
+                'avg_holding_duration_min': avg_duration,
+                
+                # Exit analysis
+                'exit_reasons': exit_reasons,
+                
+                # Confidence analysis
+                'avg_confidence': avg_confidence,
+                'avg_confidence_profitable': avg_confidence_profit,
+                'avg_confidence_losses': avg_confidence_loss,
+                
+                # In-memory statistics
+                'trading_history': trading_history_stats,
+                
+                # Model details
                 'model_performance': model_performance
             }
             

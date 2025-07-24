@@ -337,22 +337,46 @@ class HistoricalDataGenerator:
                 # Adjust features for historical time
                 features["price_usd"] = hist_point["price"]
 
-                # Calculate label based on 20min price movement
-                price_change_20min = hist_point["price_change_20min"]
-
-                if price_change_20min >= self.ml_trader.profit_threshold_good:
-                    label = "good"
-                elif price_change_20min <= self.ml_trader.loss_threshold_bad:
-                    label = "bad"
+                # Calculate actual profit for profit-based system
+                actual_profit = hist_point["price_change_20min"]
+                
+                # Simulate ML confidence for historical data (based on features)
+                momentum_factor = features.get('momentum_score', 0) / 10.0
+                volume_factor = features.get('volume_score', 0) / 10.0
+                risk_penalty = features.get('risk_score', 5.0) / 10.0
+                
+                ml_confidence = max(0.1, min(0.9, 0.5 + momentum_factor + volume_factor - risk_penalty))
+                
+                # Simulate position size and holding duration
+                position_size = self.ml_trader.min_trade_amount
+                holding_duration = 20  # minutes (simulated)
+                
+                # Determine exit reason based on profit
+                if actual_profit >= 0.15:
+                    exit_reason = "profit_target_high_confidence" if ml_confidence > 0.8 else "profit_target_medium_confidence"
+                elif actual_profit <= -0.15:
+                    exit_reason = "stop_loss"
+                elif actual_profit >= 0.02:
+                    exit_reason = "profit_target_low_confidence"
                 else:
-                    label = "neutral"
+                    exit_reason = "time_exit_low_confidence"
+                
+                # Calculate reward for this historical trade
+                reward = self.ml_trader.calculate_profit_reward(
+                    actual_profit, position_size * actual_profit, holding_duration, ml_confidence, exit_reason
+                )
 
                 sample = {
                     "token_address": token_data.get("address", ""),
                     "timestamp": hist_point["timestamp"],
                     "features": features,
-                    "price_change_after_20min": price_change_20min,
-                    "label": label,
+                    "ml_confidence": ml_confidence,
+                    "position_size": position_size,
+                    "profit_percentage": actual_profit,
+                    "profit_sol": position_size * actual_profit,
+                    "holding_duration": holding_duration,
+                    "exit_reason": exit_reason,
+                    "reward_score": reward,
                 }
 
                 samples.append(sample)
@@ -385,8 +409,10 @@ class HistoricalDataGenerator:
                     holder_count, top_10_percentage, whale_wallets,
                     risk_score, confidence_score, is_honeypot, liq_locked, has_social_links,
                     liquidity_score, volume_score, momentum_score,
-                    price_change_after_20min, label, labeled
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ml_confidence, entry_price, exit_price, position_size, profit_loss,
+                    profit_percentage, holding_duration_minutes, exit_reason, reward_score,
+                    entry_timestamp, exit_timestamp, position_closed, trade_executed
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
                 (
                     sample["token_address"],
@@ -410,9 +436,19 @@ class HistoricalDataGenerator:
                     features.get("liquidity_score", 0),
                     features.get("volume_score", 0),
                     features.get("momentum_score", 0),
-                    sample["price_change_after_20min"],
-                    sample["label"],
-                    1,  # Already labeled
+                    sample["ml_confidence"],
+                    features.get("price_usd", 0),  # entry_price
+                    features.get("price_usd", 0) * (1 + sample["profit_percentage"]),  # exit_price
+                    sample["position_size"],
+                    sample["profit_sol"],
+                    sample["profit_percentage"],
+                    sample["holding_duration"],
+                    sample["exit_reason"],
+                    sample["reward_score"],
+                    sample["timestamp"],  # entry_timestamp
+                    sample["timestamp"],  # exit_timestamp (same for historical)
+                    1,  # position_closed
+                    1,  # trade_executed
                 ),
             )
 

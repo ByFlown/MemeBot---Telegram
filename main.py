@@ -277,29 +277,52 @@ class MemeBot:
         await update.message.reply_text(msg[:4000])  # Telegram message limit
     
     async def ml_stats_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """🧠 Show ML learning statistics and trigger initial training if needed"""
+        """🧠 Show profit-based ML learning statistics"""
         if update.effective_user.id != OWNER_ID:
             return
         
         try:
             stats = self.self_learning_trader.get_training_stats()
             
-            msg = "🧠 **ML Self-Learning Statistics**\n\n"
-            msg += f"📊 **Training Data:**\n"
-            msg += f"• Total Samples: {stats.get('total_samples', 0)}\n"  
-            msg += f"• Labeled Samples: {stats.get('labeled_samples', 0)}\n"
-            msg += f"• Learning Window: {stats.get('learning_window_minutes', 20)} minutes\n\n"
+            msg = "🧠 **Profit-Based ML Learning Statistics**\n\n"
             
-            msg += f"🏷️ **Label Distribution:**\n"
-            label_dist = stats.get('label_distribution', {})
-            if label_dist:
-                for label, count in label_dist.items():
-                    percentage = (count / stats.get('labeled_samples', 1)) * 100
-                    msg += f"• {label.capitalize()}: {count} ({percentage:.1f}%)\n"
+            # Trading Overview
+            msg += f"📊 **Trading Overview:**\n"
+            msg += f"• Total Positions: {stats.get('total_positions', 0)}\n"  
+            msg += f"• Completed Trades: {stats.get('completed_trades', 0)}\n"
+            msg += f"• Active Positions: {stats.get('active_positions', 0)}\n\n"
+            
+            # Profit Statistics (All Time)
+            msg += f"💰 **Profit Statistics (All Time):**\n"
+            if stats.get('completed_trades', 0) > 0:
+                msg += f"• Average Profit: {stats.get('avg_profit_pct', 0)*100:+.2f}%\n"
+                msg += f"• Best Trade: {stats.get('max_profit_pct', 0)*100:+.2f}%\n"
+                msg += f"• Worst Trade: {stats.get('min_profit_pct', 0)*100:+.2f}%\n"
+                msg += f"• Total Profit: {stats.get('total_profit_sol', 0):.4f} SOL\n"
+                msg += f"• Avg Reward Score: {stats.get('avg_reward_score', 0):.3f}\n"
             else:
-                msg += f"• No labeled data yet\n"
+                msg += f"• No completed trades yet\n"
             
-            # Enhanced model performance info
+            # Performance (Last 7 Days)  
+            msg += f"\n🎯 **Performance (Last 7 Days):**\n"
+            if stats.get('recent_trade_count', 0) > 0:
+                msg += f"• Trades: {stats.get('recent_trade_count', 0)}\n"
+                msg += f"• Win Rate: {stats.get('win_rate_pct', 0):.1f}%\n"
+                msg += f"• Profitable Trades: {stats.get('profitable_trades_7d', 0)}\n"
+                msg += f"• Avg Profit: {stats.get('recent_avg_profit_pct', 0)*100:+.2f}%\n"
+                msg += f"• Avg Hold Time: {stats.get('avg_holding_duration_min', 0):.1f} min\n"
+            else:
+                msg += f"• No recent trades\n"
+            
+            # Exit Strategy Analysis
+            exit_reasons = stats.get('exit_reasons', {})
+            if exit_reasons:
+                msg += f"\n🚪 **Exit Strategy Analysis (7d):**\n"
+                for reason, count in sorted(exit_reasons.items(), key=lambda x: x[1], reverse=True):
+                    reason_display = reason.replace('_', ' ').title()
+                    msg += f"• {reason_display}: {count}\n"
+            
+            # Model Status
             msg += f"\n📈 **Model Status:**\n"
             msg += f"• Model Trained: {'✅ Yes' if stats.get('model_trained', False) else '❌ No'}\n"
             
@@ -307,9 +330,30 @@ class MemeBot:
             if model_perf:
                 msg += f"• Model Type: {model_perf.get('model_type', 'Unknown')}\n"
                 msg += f"• Features Used: {model_perf.get('features_count', 19)}\n"
-                msg += f"• Recent Good Ratio: {model_perf.get('recent_good_ratio', 0)*100:.1f}%\n"
+                msg += f"• Profit Threshold: {model_perf.get('profit_threshold', 0.02)*100:+.1f}%\n"
+                msg += f"• Confidence Threshold: {model_perf.get('confidence_threshold', 0.6)*100:.0f}%\n"
+                msg += f"• Max Hold Time: {model_perf.get('max_position_age_hours', 48):.0f}h\n"
+                msg += f"• Stop Loss: {model_perf.get('stop_loss_threshold', -0.15)*100:+.0f}%\n"
+                msg += f"• Online Learning: {'✅' if model_perf.get('online_learning_enabled', False) else '❌'}\n"
+                msg += f"• Performance Score: {model_perf.get('current_performance_score', 0)*100:+.2f}%\n"
             
-            msg += f"• Avg Return (7d): {stats.get('recent_avg_return_7d', 0)*100:+.2f}%\n"
+            # Confidence Analysis
+            if stats.get('avg_confidence', 0) > 0:
+                msg += f"\n🎯 **Confidence Analysis (7d):**\n"
+                msg += f"• Average Confidence: {stats.get('avg_confidence', 0)*100:.1f}%\n"
+                if stats.get('avg_confidence_profitable', 0) > 0:
+                    msg += f"• Avg Confidence (Profitable): {stats.get('avg_confidence_profitable', 0)*100:.1f}%\n"
+                if stats.get('avg_confidence_losses', 0) > 0:
+                    msg += f"• Avg Confidence (Losses): {stats.get('avg_confidence_losses', 0)*100:.1f}%\n"
+            
+            # Recent Activity
+            trade_history = stats.get('trading_history', {})
+            if trade_history:
+                msg += f"\n📝 **Recent Activity:**\n"
+                msg += f"• Recent Trades: {trade_history.get('recent_trades_count', 0)}\n"
+                msg += f"• Avg Recent Profit: {trade_history.get('avg_recent_profit', 0)*100:+.2f}%\n"
+                msg += f"• Avg Recent Reward: {trade_history.get('avg_recent_reward', 0):.3f}\n"
+                msg += f"• Avg Recent Duration: {trade_history.get('avg_recent_duration', 0):.1f} min\n"
             
             if not stats.get('model_trained', False):
                 msg += f"\n⏳ **Status:** Model not yet trained\n"
@@ -461,15 +505,12 @@ class MemeBot:
                         # Combine data for AI analysis
                         combined_data = {**token, **onchain_data}
                         
-                        # 🧠 NEW: Self-Learning AI Decision System
-                        # Start price tracking for automatic labeling (ALL tokens)
-                        await self.self_learning_trader.start_price_tracking(combined_data)
-                        
-                        # Get ML-based trading decision (only trained model)
-                        ml_decision = await self.self_learning_trader.predict_token_score(combined_data)
+                        # 🧠 NEW: Profit-Based Unsupervised Learning System
+                        # Evaluate trading opportunity with flexible profit tracking
+                        ml_decision = await self.self_learning_trader.evaluate_trade_opportunity(combined_data)
                         
                         if ml_decision['should_trade']:
-                            logger.info(f"🤖 ML Trading opportunity: {token['symbol']} - ML Score: {ml_decision['confidence']:.2f}")
+                            logger.info(f"🤖 ML Trading opportunity: {token['symbol']} - Expected Profit: {ml_decision['expected_profit']:.1%} - Confidence: {ml_decision['confidence']:.2f}")
                             
                             # Log AI trade execution decision
                             ai_trader_logger.trade_execution(
@@ -478,7 +519,8 @@ class MemeBot:
                                 amount=0.01,  # Fixed 1% position size for now
                                 ai_confidence=ml_decision['confidence'],
                                 reasoning=[ml_decision['reason']],
-                                expected_outcome='profitable' if ml_decision['confidence'] > 0.8 else 'uncertain'
+                                expected_outcome=f"expected_profit_{ml_decision['expected_profit']:.2%}",
+                                expected_profit=ml_decision['expected_profit']
                             )
                             
                             if self.real_mode:
