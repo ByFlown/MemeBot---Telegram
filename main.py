@@ -531,8 +531,7 @@ class MemeBot:
                                 amount=0.01,  # Fixed 1% position size for now
                                 ai_confidence=ml_decision['confidence'],
                                 reasoning=[ml_decision['reason']],
-                                expected_outcome=f"expected_profit_{ml_decision['expected_profit']:.2%}",
-                                expected_profit=ml_decision['expected_profit']
+                                expected_outcome=f"expected_profit_{ml_decision['expected_profit']:.2%}"
                             )
                             
                             if self.real_mode:
