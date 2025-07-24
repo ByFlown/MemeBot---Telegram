@@ -77,8 +77,7 @@ class SelfLearningTrader:
         # Flag for initial data generation
         self._initial_data_generated = False
         
-        # Start position monitoring
-        self.start_position_monitoring()
+        # Don't start position monitoring in constructor - will be started when needed
     
     def init_database(self):
         """Initialize SQLite database for training data"""
@@ -255,6 +254,9 @@ class SelfLearningTrader:
             # Save to database
             self.save_position_entry(token_address, features, ml_confidence, position_size)
             
+            # Start position monitoring if not already running
+            self.start_position_monitoring()
+            
             ml_logger.analysis(
                 f"Position opened",
                 token_address=token_address,
@@ -275,9 +277,15 @@ class SelfLearningTrader:
         """
         🔍 Starts background task to monitor all active positions
         """
-        if self.position_monitor_task is None or self.position_monitor_task.done():
-            self.position_monitor_task = asyncio.create_task(self.monitor_positions_continuously())
-            logger.info("Started position monitoring task")
+        try:
+            # Only start monitoring if there's an event loop running
+            loop = asyncio.get_running_loop()
+            if self.position_monitor_task is None or self.position_monitor_task.done():
+                self.position_monitor_task = asyncio.create_task(self.monitor_positions_continuously())
+                logger.info("Started position monitoring task")
+        except RuntimeError:
+            # No event loop running - monitoring will start when first trade is made
+            logger.debug("No event loop running - position monitoring will start when needed")
     
     async def monitor_positions_continuously(self):
         """
@@ -931,10 +939,10 @@ class SelfLearningTrader:
             logger.error(f"Error calculating model performance: {e}")
             return 0.0
     
-    async def predict_token_return(self, token_data: Dict) -> Dict:
+    async def evaluate_trade_opportunity(self, token_data: Dict) -> Dict:
         """
-        🎯 Scored neuen Token mit ML-Modell
-        HAUPTFUNKTION: Hier entscheidet das System autonom!
+        🎯 Evaluates a token for trading opportunity using profit-based ML model
+        MAIN FUNCTION: This is where the system makes autonomous trading decisions!
         """
         try:
             # Generate initial training data if not done yet
