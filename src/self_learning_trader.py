@@ -50,10 +50,10 @@ class SelfLearningTrader:
         self.stop_loss_threshold = -0.15  # Stop loss at -15%
         
         # Models - Now using regressors for reward-based learning
-        self.model = None
+        self.model = SGDRegressor(random_state=42)  # Start with basic model for immediate predictions
         self.scaler = StandardScaler()
         self.online_model = SGDRegressor(random_state=42)
-        self.is_trained = False
+        self.is_trained = False  # Will become True after first few trades provide training data
         
         # Profit-based learning configuration
         self.trade_confidence_threshold = 0.6  # Minimum confidence to execute trade
@@ -511,9 +511,7 @@ class SelfLearningTrader:
         🧠 Updates the online learning model with profit-based feedback
         """
         try:
-            if not hasattr(self.online_model, 'coef_'):
-                # Model not initialized yet, skip online learning
-                return
+            # For unsupervised learning, we initialize the model with the first training example
             
             # Prepare feature vector
             feature_columns = [
@@ -533,14 +531,26 @@ class SelfLearningTrader:
             # Weight the learning by reward magnitude (profitable trades get more weight)
             sample_weight = max(0.1, abs(reward))  # Minimum weight of 0.1
             
-            # Update online model
+            # Update online model (for continuous learning)
             self.online_model.partial_fit(
                 feature_vector_scaled, 
                 [profit_pct],
                 sample_weight=[sample_weight]
             )
             
-            logger.debug(f"Online model updated with profit {profit_pct:.3f} and reward {reward:.3f}")
+            # Also update main model for predictions
+            self.model.partial_fit(
+                feature_vector_scaled,
+                [profit_pct],
+                sample_weight=[sample_weight]
+            )
+            
+            # Mark as trained after first example
+            if not self.is_trained:
+                self.is_trained = True
+                logger.info("🎯 ML model is now trained and ready for predictions!")
+            
+            logger.debug(f"Both models updated with profit {profit_pct:.3f} and reward {reward:.3f}")
             
         except Exception as e:
             logger.error(f"Error updating model with profit: {e}")
@@ -945,17 +955,8 @@ class SelfLearningTrader:
         MAIN FUNCTION: This is where the system makes autonomous trading decisions!
         """
         try:
-            # Generate initial training data if not done yet
-            if not self.is_trained and not self._initial_data_generated:
-                await self._generate_initial_training_data()
-            
-            if not self.is_trained:
-                return {
-                    'should_trade': False,
-                    'confidence': 0.0,
-                    'probabilities': {},
-                    'reason': 'Model not trained yet'
-                }
+            # For fully unsupervised learning, we don't need historical data
+            # The model starts making predictions immediately and learns from actual results
             
             # Extract features
             features = self.extract_features(token_data)
@@ -981,35 +982,56 @@ class SelfLearningTrader:
             feature_data = {col: [features.get(col, 0)] for col in feature_columns}
             feature_df = pd.DataFrame(feature_data)
             
-            # Scale features (now with consistent feature names)
-            feature_vector_scaled = self.scaler.transform(feature_df)
-            
-            # Get prediction probabilities
-            probabilities = self.model.predict_proba(feature_vector_scaled)[0]
-            classes = self.model.classes_
-            
-            prob_dict = dict(zip(classes, probabilities))
-            
-            # Decision logic
-            good_prob = prob_dict.get('good', 0.0)
-            should_trade = good_prob > 0.7  # 70% Schwellwert für "good"
-            
-            result = {
-                'should_trade': should_trade,
-                'confidence': good_prob,
-                'probabilities': prob_dict,
-                'reason': f"ML prediction: {good_prob:.1%} good probability"
-            }
+            # For unsupervised learning, we need to handle the case where scaler isn't fitted yet
+            if not self.is_trained:
+                # For first predictions, fit scaler with this data point and make random prediction
+                self.scaler.fit(feature_df)
+                feature_vector_scaled = self.scaler.transform(feature_df)
+                
+                # Make initial random prediction (between -0.2 to +0.3 expected profit)
+                import random
+                expected_profit = random.uniform(-0.2, 0.3)
+                confidence = random.uniform(0.1, 0.9)
+                
+                should_trade = confidence >= self.trade_confidence_threshold and expected_profit > 0
+                
+                result = {
+                    'should_trade': should_trade,
+                    'confidence': confidence,
+                    'expected_profit': expected_profit,
+                    'reason': f"Initial prediction: {expected_profit:.1%} expected profit (confidence: {confidence:.1%})"
+                }
+            else:
+                # Use trained model for prediction
+                feature_vector_scaled = self.scaler.transform(feature_df)
+                
+                # Predict expected profit using the trained regressor
+                expected_profit = self.model.predict(feature_vector_scaled)[0]
+                
+                # Calculate confidence based on recent model performance
+                confidence = self._calculate_prediction_confidence()
+                
+                # Trading decision based on expected profit and confidence
+                should_trade = (confidence >= self.trade_confidence_threshold and 
+                              expected_profit > self.min_profit_threshold)
+                
+                result = {
+                    'should_trade': should_trade,
+                    'confidence': confidence,
+                    'expected_profit': expected_profit,
+                    'reason': f"ML prediction: {expected_profit:.1%} expected profit (confidence: {confidence:.1%})"
+                }
             
             # Log prediction
             ml_logger.prediction(
                 f"Token scored: {'TRADE' if should_trade else 'SKIP'}",
-                predicted_value=good_prob,
-                prediction_horizon=f"{self.learning_window_minutes}min",
+                predicted_value=result['expected_profit'],
+                prediction_horizon="dynamic",
                 model_info={
                     'model_type': type(self.model).__name__,
-                    'probabilities': {k: f"{v:.3f}" for k, v in prob_dict.items()},
-                    'decision_threshold': 0.7
+                    'expected_profit': f"{result['expected_profit']:.3f}",
+                    'confidence': f"{result['confidence']:.3f}",
+                    'is_trained': self.is_trained
                 }
             )
             
@@ -1020,9 +1042,52 @@ class SelfLearningTrader:
             return {
                 'should_trade': False,
                 'confidence': 0.0,
-                'probabilities': {},
+                'expected_profit': 0.0,
                 'reason': f'Prediction error: {e}'
             }
+    
+    def _calculate_prediction_confidence(self) -> float:
+        """
+        Calculate prediction confidence based on recent model performance
+        """
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            # Get recent completed trades (last 20 trades or 7 days)
+            cursor.execute("""
+                SELECT profit_percentage, reward_score, ml_confidence
+                FROM training_data 
+                WHERE position_closed = 1 
+                  AND exit_timestamp >= datetime('now', '-7 days')
+                ORDER BY exit_timestamp DESC 
+                LIMIT 20
+            """)
+            
+            recent_trades = cursor.fetchall()
+            conn.close()
+            
+            if len(recent_trades) < 3:
+                # Not enough data, return moderate confidence
+                return 0.5
+            
+            # Calculate confidence based on recent performance
+            total_trades = len(recent_trades)
+            profitable_trades = sum(1 for profit, reward, conf in recent_trades if profit > 0)
+            avg_reward = sum(reward for profit, reward, conf in recent_trades) / total_trades
+            
+            # Base confidence on win rate and reward score
+            win_rate = profitable_trades / total_trades
+            reward_factor = max(0, min(1, (avg_reward + 1) / 2))  # Normalize rewards to 0-1
+            
+            # Combine metrics
+            confidence = (win_rate * 0.7) + (reward_factor * 0.3)
+            
+            return max(0.1, min(0.9, confidence))  # Clamp between 0.1 and 0.9
+            
+        except Exception as e:
+            logger.error(f"Error calculating prediction confidence: {e}")
+            return 0.5  # Default moderate confidence
     
     def save_models(self):
         """
@@ -1319,6 +1384,7 @@ class SelfLearningTrader:
         except Exception as e:
             logger.error(f"Error generating initial training data: {e}")
             self._initial_data_generated = True  # Don't retry
+    
     
     async def clear_model(self) -> bool:
         """
