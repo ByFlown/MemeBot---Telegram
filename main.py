@@ -76,6 +76,9 @@ class MemeBot:
         self.scanning_active = True
         self.scan_interval = 300  # 5 minutes default
         
+        # Set paper trading mode on wallet manager
+        self.wallet_manager.set_paper_mode(not self.real_mode)
+        
         # Performance tracking
         self.total_trades = 0
         self.successful_trades = 0
@@ -106,7 +109,10 @@ class MemeBot:
                 "/retrain - Force model retraining\n"
                 "/quickstart - Generate training data\n"
                 "/clearmodel - Clear model for fresh training\n"
-                "/dump - Emergency stop all positions",
+                "/dump - Emergency stop all positions\n"
+                "/addfunds <amount> - Add SOL to paper trading account\n"
+                "/resetaccount - Reset paper trading account\n"
+                "/portfolio - Show detailed portfolio summary",
                 parse_mode='Markdown'
             )
         except Exception as e:
@@ -151,9 +157,11 @@ class MemeBot:
                 await update.message.reply_text("❌ Wallet not configured! Add private key first.")
                 return
             self.real_mode = True
+            self.wallet_manager.set_paper_mode(False)  # Disable paper mode
             await update.message.reply_text("🚨 **REAL TRADING MODE ACTIVATED** 🚨\nBot will trade with real money!")
         elif mode == "off":
             self.real_mode = False
+            self.wallet_manager.set_paper_mode(True)  # Enable paper mode
             await update.message.reply_text("📝 Paper trading mode activated. No real money at risk.")
         else:
             await update.message.reply_text("Usage: /realmode on|off")
@@ -202,13 +210,32 @@ class MemeBot:
             return
             
         wallet_info = await self.wallet_manager.get_wallet_info()
-        await update.message.reply_text(
-            f"💎 **Wallet Information**\n\n"
-            f"Address: `{wallet_info['address']}`\n"
-            f"SOL Balance: {wallet_info['sol_balance']:.4f} SOL\n"
-            f"Token Count: {wallet_info['token_count']}\n"
-            f"Status: {'🟢 Connected' if wallet_info['connected'] else '🔴 Disconnected'}"
-        )
+        
+        if wallet_info.get('paper_mode', False):
+            # Paper trading wallet info
+            msg = (
+                f"💎 **Paper Trading Wallet**\n\n"
+                f"Mode: 📝 Paper Trading\n"
+                f"SOL Balance: {wallet_info['sol_balance']:.4f} SOL\n"
+                f"Active Positions: {wallet_info['active_positions']}\n"
+                f"Starting Balance: {wallet_info.get('starting_balance', 100):.4f} SOL\n"
+                f"Total Invested: {wallet_info.get('total_invested', 0):.4f} SOL\n"
+                f"P&L: {wallet_info.get('total_profit_loss', 0):+.4f} SOL\n"
+                f"Performance: {wallet_info.get('performance_pct', 0):+.2f}%\n"
+                f"Status: {'🟢 Active' if wallet_info['connected'] else '🔴 Inactive'}"
+            )
+        else:
+            # Real wallet info
+            msg = (
+                f"💎 **Real Wallet Information**\n\n"
+                f"Address: `{wallet_info['address']}`\n"
+                f"SOL Balance: {wallet_info['sol_balance']:.4f} SOL\n"
+                f"Token Count: {wallet_info['token_count']}\n"
+                f"Active Positions: {wallet_info.get('active_positions', 0)}\n"
+                f"Status: {'🟢 Connected' if wallet_info['connected'] else '🔴 Disconnected'}"
+            )
+        
+        await update.message.reply_text(msg)
     
     async def top5_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Show top 5 recent opportunities"""
@@ -477,6 +504,100 @@ class MemeBot:
         except Exception as e:
             await update.message.reply_text(f"❌ Clear model failed: {e}")
     
+    async def addfunds_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Add funds to paper trading account"""
+        if update.effective_user.id != OWNER_ID:
+            return
+        
+        if not context.args:
+            await update.message.reply_text("Usage: /addfunds <amount>\nExample: /addfunds 50")
+            return
+        
+        try:
+            amount = float(context.args[0])
+            if amount <= 0:
+                await update.message.reply_text("❌ Amount must be greater than 0")
+                return
+            
+            if self.wallet_manager.paper_mode:
+                self.wallet_manager.paper_trading.add_funds(amount, "Manual deposit via Telegram")
+                new_balance = self.wallet_manager.paper_trading.get_balance()
+                await update.message.reply_text(
+                    f"✅ **Added {amount:.4f} SOL to paper trading account**\n\n"
+                    f"New Balance: {new_balance:.4f} SOL"
+                )
+            else:
+                await update.message.reply_text("❌ This command only works in paper trading mode")
+                
+        except ValueError:
+            await update.message.reply_text("❌ Please provide a valid number")
+        except Exception as e:
+            await update.message.reply_text(f"❌ Error adding funds: {e}")
+    
+    async def resetaccount_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Reset paper trading account"""
+        if update.effective_user.id != OWNER_ID:
+            return
+        
+        if self.wallet_manager.paper_mode:
+            # Get optional new balance from args
+            new_balance = None
+            if context.args:
+                try:
+                    new_balance = float(context.args[0])
+                    if new_balance <= 0:
+                        await update.message.reply_text("❌ Initial balance must be greater than 0")
+                        return
+                except ValueError:
+                    await update.message.reply_text("❌ Please provide a valid number for initial balance")
+                    return
+            
+            self.wallet_manager.paper_trading.reset_account(new_balance)
+            balance = self.wallet_manager.paper_trading.get_balance()
+            
+            await update.message.reply_text(
+                f"✅ **Paper trading account reset**\n\n"
+                f"New Balance: {balance:.4f} SOL\n"
+                f"All positions closed\n"
+                f"Trade history cleared"
+            )
+        else:
+            await update.message.reply_text("❌ This command only works in paper trading mode")
+    
+    async def portfolio_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show detailed portfolio summary"""
+        if update.effective_user.id != OWNER_ID:
+            return
+        
+        if self.wallet_manager.paper_mode:
+            summary = self.wallet_manager.paper_trading.get_portfolio_summary()
+            positions = self.wallet_manager.paper_trading.get_all_positions()
+            
+            msg = f"📊 **Paper Trading Portfolio**\n\n"
+            msg += f"💰 **Balance**: {summary['current_balance']:.4f} SOL\n"
+            msg += f"📈 **Performance**: {summary['performance_percentage']:+.2f}%\n"
+            msg += f"💎 **Total P&L**: {summary['total_profit_loss']:+.4f} SOL\n"
+            msg += f"📊 **Invested**: {summary['total_invested']:.4f} SOL\n"
+            msg += f"🏦 **Portfolio Value**: {summary['total_portfolio_value']:.4f} SOL\n"
+            msg += f"📈 **Total Trades**: {summary['total_trades']}\n\n"
+            
+            if positions:
+                msg += f"🎯 **Active Positions** ({len(positions)}):\n"
+                for i, (token_addr, pos) in enumerate(positions.items(), 1):
+                    if i > 5:  # Limit to 5 positions for readability
+                        msg += f"... and {len(positions) - 5} more\n"
+                        break
+                    symbol = pos.get('token_symbol', 'UNKNOWN')[:8]
+                    invested = pos.get('entry_amount_sol', 0)
+                    entry_price = pos.get('entry_price', 0)
+                    msg += f"{i}. {symbol}: {invested:.3f} SOL @ ${entry_price:.6f}\n"
+            else:
+                msg += f"📝 No active positions\n"
+            
+            await update.message.reply_text(msg)
+        else:
+            await update.message.reply_text("❌ Portfolio summary only available in paper trading mode")
+    
     async def dump_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Emergency stop - sell all positions"""
         if update.effective_user.id != OWNER_ID:
@@ -534,21 +655,14 @@ class MemeBot:
                                 expected_outcome=f"expected_profit_{ml_decision['expected_profit']:.2%}"
                             )
                             
-                            if self.real_mode:
-                                # Execute real trade
-                                trade_result = await self.wallet_manager.execute_trade(
-                                    token_address=token['address'],
-                                    amount_sol=0.01,  # Fixed 1% position
-                                    action='buy'
-                                )
-                            else:
-                                # Paper trade
-                                trade_result = {
-                                    'success': True,
-                                    'amount': 0.01,
-                                    'price': token.get('price_usd', 0),
-                                    'type': 'paper'
-                                }
+                            # Execute trade (real or paper mode handled by wallet manager)
+                            trade_result = await self.wallet_manager.execute_trade(
+                                token_address=token['address'],
+                                amount_sol=0.01,  # Fixed 1% position
+                                action='buy',
+                                token_price=token.get('price_usd', 0),
+                                token_symbol=token.get('symbol', 'UNKNOWN')
+                            )
                             
                             # Log trade
                             self.trading_logger.log_trade(token, trade_result, ml_decision)
@@ -637,7 +751,10 @@ class MemeBot:
                 BotCommand("retrain", "Force ML model retraining"),
                 BotCommand("quickstart", "Generate immediate training data"),
                 BotCommand("clearmodel", "Clear ML model for fresh 80/20 training"),
-                BotCommand("dump", "Emergency stop - close all positions")
+                BotCommand("dump", "Emergency stop - close all positions"),
+                BotCommand("addfunds", "Add SOL to paper trading account"),
+                BotCommand("resetaccount", "Reset paper trading account"),
+                BotCommand("portfolio", "Show detailed portfolio summary")
             ]
             
             await application.bot.set_my_commands(commands)
@@ -700,6 +817,9 @@ async def main():
         application.add_handler(CommandHandler("retrain", bot.retrain_command))
         application.add_handler(CommandHandler("quickstart", bot.quickstart_command))
         application.add_handler(CommandHandler("clearmodel", bot.clearmodel_command))
+        application.add_handler(CommandHandler("addfunds", bot.addfunds_command))
+        application.add_handler(CommandHandler("resetaccount", bot.resetaccount_command))
+        application.add_handler(CommandHandler("portfolio", bot.portfolio_command))
         
         # Setup scheduler
         bot.setup_scheduler()

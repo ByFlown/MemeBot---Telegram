@@ -15,6 +15,8 @@ import base58
 import base64
 
 from .solana_client_fix import create_safe_rpc_client
+from .paper_trading_manager import PaperTradingManager
+from config import PAPER_TRADING_INITIAL_BALANCE, PAPER_TRADING_MAX_TRADE_PCT
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +46,13 @@ class WalletManager:
         self.active_positions = {}
         self.trade_history = []
         
+        # Paper trading manager
+        self.paper_trading = PaperTradingManager(initial_balance=PAPER_TRADING_INITIAL_BALANCE)
+        self.paper_trading.max_trade_percentage = PAPER_TRADING_MAX_TRADE_PCT
+        
+        # Paper trading mode flag (set by main bot)
+        self.paper_mode = True  # Default to paper mode for safety
+        
         self._load_wallet()
     
     def _load_wallet(self):
@@ -67,6 +76,11 @@ class WalletManager:
     def is_configured(self) -> bool:
         """Check if wallet is properly configured"""
         return self.keypair is not None
+    
+    def set_paper_mode(self, enabled: bool):
+        """Set paper trading mode"""
+        self.paper_mode = enabled
+        logger.info(f"Paper trading mode: {'ENABLED' if enabled else 'DISABLED'}")
     
     async def get_session(self):
         """Get or create aiohttp session"""
@@ -94,8 +108,13 @@ class WalletManager:
         raise Exception("No working RPC endpoints available")
     
     async def get_sol_balance(self) -> float:
-        """Get SOL balance of the wallet"""
+        """Get SOL balance of the wallet (paper or real)"""
         try:
+            # In paper mode, return paper trading balance
+            if self.paper_mode:
+                return self.paper_trading.get_balance()
+            
+            # Real mode - get actual wallet balance
             if not self.is_configured():
                 return 0.0
             
@@ -154,15 +173,33 @@ class WalletManager:
     async def get_wallet_info(self) -> Dict:
         """Get comprehensive wallet information"""
         try:
+            sol_balance = await self.get_sol_balance()
+            
+            # Paper trading mode
+            if self.paper_mode:
+                paper_summary = self.paper_trading.get_portfolio_summary()
+                return {
+                    'address': 'Paper Trading Mode',
+                    'sol_balance': sol_balance,
+                    'token_count': paper_summary['active_positions_count'],
+                    'connected': True,
+                    'active_positions': paper_summary['active_positions_count'],
+                    'paper_mode': True,
+                    'total_invested': paper_summary['total_invested'],
+                    'total_profit_loss': paper_summary['total_profit_loss'],
+                    'performance_pct': paper_summary['performance_percentage'],
+                    'starting_balance': paper_summary['starting_balance']
+                }
+            
+            # Real trading mode
             if not self.is_configured():
                 return {
                     'address': 'Not configured',
                     'sol_balance': 0.0,
                     'token_count': 0,
-                    'connected': False
+                    'connected': False,
+                    'paper_mode': False
                 }
-            
-            sol_balance = await self.get_sol_balance()
             
             # Get token accounts
             client = await self.get_rpc_client()
@@ -183,7 +220,8 @@ class WalletManager:
                 'sol_balance': sol_balance,
                 'token_count': token_count,
                 'connected': True,
-                'active_positions': len(self.active_positions)
+                'active_positions': len(self.active_positions),
+                'paper_mode': False
             }
             
         except Exception as e:
@@ -192,19 +230,13 @@ class WalletManager:
                 'address': self.wallet_address or 'Error',
                 'sol_balance': 0.0,
                 'token_count': 0,
-                'connected': False
+                'connected': False,
+                'paper_mode': self.paper_mode
             }
     
-    async def execute_trade(self, token_address: str, amount_sol: float, action: str) -> Dict:
-        """Execute a trade (buy/sell) using Jupiter aggregator"""
+    async def execute_trade(self, token_address: str, amount_sol: float, action: str, token_price: float = 0.0, token_symbol: str = "UNKNOWN") -> Dict:
+        """Execute a trade (buy/sell) using Jupiter aggregator or paper trading"""
         try:
-            if not self.is_configured():
-                return {
-                    'success': False,
-                    'error': 'Wallet not configured',
-                    'type': 'config_error'
-                }
-            
             if action not in ['buy', 'sell']:
                 return {
                     'success': False,
@@ -212,7 +244,24 @@ class WalletManager:
                     'type': 'invalid_action'
                 }
             
-            logger.info(f"Executing {action} trade: {amount_sol} SOL for {token_address}")
+            # Paper trading mode
+            if self.paper_mode:
+                logger.info(f"Executing PAPER {action} trade: {amount_sol} SOL for {token_address}")
+                
+                if action == 'buy':
+                    return self.paper_trading.execute_buy_trade(token_address, amount_sol, token_price, token_symbol)
+                else:  # sell
+                    return self.paper_trading.execute_sell_trade(token_address, token_price, 1.0)  # Sell 100%
+            
+            # Real trading mode
+            if not self.is_configured():
+                return {
+                    'success': False,
+                    'error': 'Wallet not configured',
+                    'type': 'config_error'
+                }
+            
+            logger.info(f"Executing REAL {action} trade: {amount_sol} SOL for {token_address}")
             
             # Get quote from Jupiter
             quote = await self._get_jupiter_quote(token_address, amount_sol, action)
@@ -421,10 +470,23 @@ class WalletManager:
     async def close_all_positions(self) -> List[Dict]:
         """Emergency close all positions"""
         try:
+            closed_positions = []
+            
+            # Paper trading mode
+            if self.paper_mode:
+                # Get current prices for all positions (simplified - use entry prices)
+                current_prices = {}
+                for token_address, position in self.paper_trading.get_all_positions().items():
+                    # In a real implementation, you'd fetch current prices from DexScreener
+                    # For now, use entry price as a fallback
+                    current_prices[token_address] = position.get('entry_price', 0.0)
+                
+                closed_positions_data = self.paper_trading.close_all_positions(current_prices)
+                return closed_positions_data
+            
+            # Real trading mode
             if not self.is_configured():
                 return []
-            
-            closed_positions = []
             
             for token_address, position in list(self.active_positions.items()):
                 try:

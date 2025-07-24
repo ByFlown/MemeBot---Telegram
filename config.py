@@ -53,6 +53,10 @@ WEBHOOK_SECRET = os.getenv('WEBHOOK_SECRET', '')
 DEBUG_MODE = os.getenv('DEBUG_MODE', 'false').lower() == 'true'
 PAPER_TRADING_ONLY = os.getenv('PAPER_TRADING_ONLY', 'true').lower() == 'true'
 
+# Paper Trading Configuration
+PAPER_TRADING_INITIAL_BALANCE = float(os.getenv('PAPER_TRADING_INITIAL_BALANCE', '100.0'))  # Starting SOL for paper trading
+PAPER_TRADING_MAX_TRADE_PCT = float(os.getenv('PAPER_TRADING_MAX_TRADE_PCT', '0.10'))  # Max 10% per trade
+
 # Only print configuration in local development, not in production
 if not os.getenv('FLY_APP_NAME'):  # Only print locally, not on Fly.io
     print(f"✅ Configuration loaded:")
