@@ -123,6 +123,10 @@ class SelfLearningTrader:
                 volume_score REAL,
                 momentum_score REAL,
                 
+                -- Market Status Features
+                is_boosted INTEGER DEFAULT 0,  -- If token is boosted on DexScreener
+                is_trending INTEGER DEFAULT 0, -- If token is trending
+                
                 -- Profit-based learning data
                 ml_confidence REAL,     -- ML confidence score (0-1)
                 entry_price REAL,       -- Price when position opened
@@ -196,6 +200,10 @@ class SelfLearningTrader:
                 features['momentum_score'] = min(10.0, (volume_24h / liquidity) * (24 / age_hours))
             else:
                 features['momentum_score'] = 0.0
+            
+            # Market Status Features
+            features['is_boosted'] = int(token_data.get('boosted', False) or token_data.get('boosts', {}).get('active', False))
+            features['is_trending'] = int(token_data.get('trending', False) or token_data.get('trendingOn', []) != [])
             
             # Log feature extraction
             ml_logger.analysis(
@@ -505,7 +513,8 @@ class SelfLearningTrader:
                 'age_minutes', 'price_change_24h', 'volume_change_24h',
                 'holder_count', 'top_10_percentage', 'whale_wallets',
                 'risk_score', 'confidence_score', 'is_honeypot', 'liq_locked', 
-                'has_social_links', 'liquidity_score', 'volume_score', 'momentum_score'
+                'has_social_links', 'liquidity_score', 'volume_score', 'momentum_score',
+                'is_boosted', 'is_trending'
             ]
             
             feature_data = {col: [features.get(col, 0)] for col in feature_columns}
@@ -543,9 +552,9 @@ class SelfLearningTrader:
                     age_minutes, price_change_24h, volume_change_24h,
                     holder_count, top_10_percentage, whale_wallets,
                     risk_score, confidence_score, is_honeypot, liq_locked, has_social_links,
-                    liquidity_score, volume_score, momentum_score,
+                    liquidity_score, volume_score, momentum_score, is_boosted, is_trending,
                     ml_confidence, entry_price, position_size, entry_timestamp, position_closed, trade_executed
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 token_address, datetime.now(),
                 features.get('price_usd', 0), features.get('volume_24h', 0), features.get('volume_5m', 0),
@@ -555,6 +564,7 @@ class SelfLearningTrader:
                 features.get('risk_score', 5.0), features.get('confidence_score', 5.0),
                 features.get('is_honeypot', 0), features.get('liq_locked', 0), features.get('has_social_links', 0),
                 features.get('liquidity_score', 0), features.get('volume_score', 0), features.get('momentum_score', 0),
+                features.get('is_boosted', 0), features.get('is_trending', 0),
                 ml_confidence, features.get('price_usd', 0), position_size, datetime.now(), 0, 1
             ))
             
@@ -783,7 +793,8 @@ class SelfLearningTrader:
                 'age_minutes', 'price_change_24h', 'volume_change_24h',
                 'holder_count', 'top_10_percentage', 'whale_wallets',
                 'risk_score', 'confidence_score', 'is_honeypot', 'liq_locked', 
-                'has_social_links', 'liquidity_score', 'volume_score', 'momentum_score'
+                'has_social_links', 'liquidity_score', 'volume_score', 'momentum_score',
+                'is_boosted', 'is_trending'
             ]
             
             X = df[feature_columns].fillna(0)
@@ -954,7 +965,8 @@ class SelfLearningTrader:
                 'age_minutes', 'price_change_24h', 'volume_change_24h',
                 'holder_count', 'top_10_percentage', 'whale_wallets',
                 'risk_score', 'confidence_score', 'is_honeypot', 'liq_locked', 
-                'has_social_links', 'liquidity_score', 'volume_score', 'momentum_score'
+                'has_social_links', 'liquidity_score', 'volume_score', 'momentum_score',
+                'is_boosted', 'is_trending'
             ]
             
             # Create DataFrame with feature names to avoid sklearn warning
@@ -1137,6 +1149,35 @@ class SelfLearningTrader:
                 confidence_stats if confidence_stats[0] is not None else (0, 0, 0)
             )
             
+            # Boosted/Trending token performance analysis
+            cursor.execute("""
+                SELECT 
+                    COUNT(*) as total_boosted,
+                    AVG(profit_percentage) as avg_profit_boosted,
+                    SUM(CASE WHEN profit_percentage > 0 THEN 1 ELSE 0 END) as profitable_boosted
+                FROM training_data 
+                WHERE position_closed = 1 AND is_boosted = 1
+                AND exit_timestamp > datetime('now', '-7 days')
+            """)
+            boosted_stats = cursor.fetchone()
+            total_boosted, avg_profit_boosted, profitable_boosted = (
+                boosted_stats if boosted_stats[0] is not None else (0, 0, 0)
+            )
+            
+            cursor.execute("""
+                SELECT 
+                    COUNT(*) as total_trending,
+                    AVG(profit_percentage) as avg_profit_trending,
+                    SUM(CASE WHEN profit_percentage > 0 THEN 1 ELSE 0 END) as profitable_trending
+                FROM training_data 
+                WHERE position_closed = 1 AND is_trending = 1
+                AND exit_timestamp > datetime('now', '-7 days')
+            """)
+            trending_stats = cursor.fetchone()
+            total_trending, avg_profit_trending, profitable_trending = (
+                trending_stats if trending_stats[0] is not None else (0, 0, 0)
+            )
+            
             conn.close()
             
             # Calculate win rate
@@ -1158,7 +1199,7 @@ class SelfLearningTrader:
             if self.is_trained:
                 model_performance = {
                     'model_type': type(self.model).__name__ if self.model else 'Unknown',
-                    'features_count': 19,
+                    'features_count': 21,  # Updated to include boosted and trending
                     'profit_threshold': self.min_profit_threshold,
                     'confidence_threshold': self.trade_confidence_threshold,
                     'max_position_age_hours': self.max_position_age_hours,
@@ -1194,6 +1235,16 @@ class SelfLearningTrader:
                 'avg_confidence': avg_confidence,
                 'avg_confidence_profitable': avg_confidence_profit,
                 'avg_confidence_losses': avg_confidence_loss,
+                
+                # Boosted/Trending analysis (last 7 days)
+                'boosted_trades': total_boosted,
+                'boosted_avg_profit': avg_profit_boosted,
+                'boosted_profitable': profitable_boosted,
+                'boosted_win_rate': (profitable_boosted / total_boosted * 100) if total_boosted > 0 else 0,
+                'trending_trades': total_trending,
+                'trending_avg_profit': avg_profit_trending,
+                'trending_profitable': profitable_trending,
+                'trending_win_rate': (profitable_trending / total_trending * 100) if total_trending > 0 else 0,
                 
                 # In-memory statistics
                 'trading_history': trading_history_stats,

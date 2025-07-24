@@ -238,6 +238,9 @@ class HistoricalDataGenerator:
                 "volume_score": min(
                     10.0, float(volume_data.get("h24", 0) or 0) / 100000
                 ),
+                # Market Status Features (historical data simulation)
+                "is_boosted": 0,  # Assume not boosted for historical data
+                "is_trending": 1 if float(volume_data.get("h24", 0) or 0) > 100000 else 0,  # Trending if high volume
                 "website": "",
                 "twitter": "",
             }
@@ -408,11 +411,11 @@ class HistoricalDataGenerator:
                     age_minutes, price_change_24h, volume_change_24h,
                     holder_count, top_10_percentage, whale_wallets,
                     risk_score, confidence_score, is_honeypot, liq_locked, has_social_links,
-                    liquidity_score, volume_score, momentum_score,
+                    liquidity_score, volume_score, momentum_score, is_boosted, is_trending,
                     ml_confidence, entry_price, exit_price, position_size, profit_loss,
                     profit_percentage, holding_duration_minutes, exit_reason, reward_score,
                     entry_timestamp, exit_timestamp, position_closed, trade_executed
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
                 (
                     sample["token_address"],
@@ -436,6 +439,8 @@ class HistoricalDataGenerator:
                     features.get("liquidity_score", 0),
                     features.get("volume_score", 0),
                     features.get("momentum_score", 0),
+                    features.get("is_boosted", 0),
+                    features.get("is_trending", 0),
                     sample["ml_confidence"],
                     features.get("price_usd", 0),  # entry_price
                     features.get("price_usd", 0) * (1 + sample["profit_percentage"]),  # exit_price

@@ -346,6 +346,18 @@ class MemeBot:
                 if stats.get('avg_confidence_losses', 0) > 0:
                     msg += f"• Avg Confidence (Losses): {stats.get('avg_confidence_losses', 0)*100:.1f}%\n"
             
+            # Boosted/Trending Token Analysis
+            if stats.get('boosted_trades', 0) > 0 or stats.get('trending_trades', 0) > 0:
+                msg += f"\n⭐ **Market Status Analysis (7d):**\n"
+                if stats.get('boosted_trades', 0) > 0:
+                    msg += f"• Boosted Tokens: {stats.get('boosted_trades', 0)} trades\n"
+                    msg += f"  - Win Rate: {stats.get('boosted_win_rate', 0):.1f}%\n"
+                    msg += f"  - Avg Profit: {stats.get('boosted_avg_profit', 0)*100:+.2f}%\n"
+                if stats.get('trending_trades', 0) > 0:
+                    msg += f"• Trending Tokens: {stats.get('trending_trades', 0)} trades\n"
+                    msg += f"  - Win Rate: {stats.get('trending_win_rate', 0):.1f}%\n"
+                    msg += f"  - Avg Profit: {stats.get('trending_avg_profit', 0)*100:+.2f}%\n"
+            
             # Recent Activity
             trade_history = stats.get('trading_history', {})
             if trade_history:
