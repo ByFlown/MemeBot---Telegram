@@ -1330,6 +1330,123 @@ class SelfLearningTrader:
             logger.error(f"Error getting training stats: {e}")
             return {}
     
+    def get_ml_accuracy_metrics(self) -> Dict:
+        """
+        🎯 Calculate comprehensive ML accuracy metrics
+        Returns various accuracy measures for display in commands
+        """
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            # Get recent trades with predictions and outcomes (last 30 days for accuracy)
+            cursor.execute("""
+                SELECT ml_confidence, profit_percentage, reward_score, exit_reason,
+                       (profit_percentage > 0) as was_profitable
+                FROM training_data 
+                WHERE position_closed = 1 AND ml_confidence IS NOT NULL
+                AND exit_timestamp > datetime('now', '-30 days')
+                ORDER BY exit_timestamp DESC
+                LIMIT 100
+            """)
+            recent_trades = cursor.fetchall()
+            
+            if not recent_trades:
+                conn.close()
+                return {
+                    'total_trades_analyzed': 0,
+                    'direction_accuracy': 0.0,
+                    'overall_accuracy': 0.0,
+                    'confidence_calibration': 0.0,
+                    'high_confidence_accuracy': 0.0,
+                    'low_confidence_accuracy': 0.0,
+                    'avg_confidence': 0.0,
+                    'profit_prediction_rmse': 0.0,
+                    'period_days': 30
+                }
+            
+            # Extract data for analysis
+            confidences = [trade[0] for trade in recent_trades]
+            profit_percentages = [trade[1] for trade in recent_trades]
+            reward_scores = [trade[2] for trade in recent_trades]
+            profitable_trades = [trade[4] for trade in recent_trades]
+            
+            # 1. Direction Accuracy - Did we predict profitable vs unprofitable correctly?
+            predicted_profitable = [conf > 0.5 for conf in confidences]  # Above 50% confidence = predicted profit
+            actual_profitable = profitable_trades
+            
+            direction_correct = sum(1 for pred, actual in zip(predicted_profitable, actual_profitable) if pred == actual)
+            direction_accuracy = (direction_correct / len(recent_trades)) * 100
+            
+            # 2. Overall Accuracy - Based on reward scores (positive reward = good prediction)
+            positive_rewards = sum(1 for reward in reward_scores if reward > 0)
+            overall_accuracy = (positive_rewards / len(recent_trades)) * 100
+            
+            # 3. Confidence Calibration - Do high confidence predictions perform better?
+            high_conf_trades = [(conf, profit) for conf, profit in zip(confidences, profitable_trades) if conf > 0.7]
+            low_conf_trades = [(conf, profit) for conf, profit in zip(confidences, profitable_trades) if conf <= 0.5]
+            
+            high_conf_accuracy = 0.0
+            if high_conf_trades:
+                high_conf_success = sum(1 for _, profit in high_conf_trades if profit)
+                high_conf_accuracy = (high_conf_success / len(high_conf_trades)) * 100
+            
+            low_conf_accuracy = 0.0
+            if low_conf_trades:
+                low_conf_success = sum(1 for _, profit in low_conf_trades if profit)
+                low_conf_accuracy = (low_conf_success / len(low_conf_trades)) * 100
+            
+            # 4. Confidence vs Performance Correlation
+            if len(confidences) > 1:
+                # Simple correlation between confidence and profitability
+                avg_conf_profitable = sum(conf for conf, profit in zip(confidences, profitable_trades) if profit) / max(sum(profitable_trades), 1)
+                avg_conf_unprofitable = sum(conf for conf, profit in zip(confidences, profitable_trades) if not profit) / max(len(profitable_trades) - sum(profitable_trades), 1)
+                confidence_calibration = avg_conf_profitable - avg_conf_unprofitable
+            else:
+                confidence_calibration = 0.0
+            
+            # 5. Profit Prediction RMSE (Root Mean Square Error)
+            # Compare predicted profit (scaled confidence) vs actual profit
+            predicted_profits = [(conf - 0.5) * 0.4 for conf in confidences]  # Scale confidence to expected profit range
+            actual_profits = profit_percentages
+            
+            squared_errors = [(pred - actual) ** 2 for pred, actual in zip(predicted_profits, actual_profits)]
+            profit_prediction_rmse = (sum(squared_errors) / len(squared_errors)) ** 0.5 if squared_errors else 0.0
+            
+            # 6. Model Performance Score (from existing method)
+            model_performance_score = self.get_model_performance() * 100 if self.is_trained else 0.0
+            
+            conn.close()
+            
+            return {
+                'total_trades_analyzed': len(recent_trades),
+                'direction_accuracy': direction_accuracy,  # % of correct profit/loss predictions
+                'overall_accuracy': overall_accuracy,      # % of trades with positive rewards
+                'model_performance_score': model_performance_score,  # Model's internal performance score
+                'confidence_calibration': confidence_calibration * 100,  # How well confidence correlates with success
+                'high_confidence_accuracy': high_conf_accuracy,  # Success rate of high confidence trades (>70%)
+                'low_confidence_accuracy': low_conf_accuracy,   # Success rate of low confidence trades (≤50%)
+                'avg_confidence': sum(confidences) / len(confidences) if confidences else 0.0,
+                'profit_prediction_rmse': profit_prediction_rmse,  # How accurate profit predictions are
+                'period_days': 30,
+                'high_conf_trade_count': len(high_conf_trades),
+                'low_conf_trade_count': len(low_conf_trades)
+            }
+            
+        except Exception as e:
+            logger.error(f"Error calculating ML accuracy metrics: {e}")
+            return {
+                'total_trades_analyzed': 0,
+                'direction_accuracy': 0.0,
+                'overall_accuracy': 0.0,
+                'confidence_calibration': 0.0,
+                'high_confidence_accuracy': 0.0,
+                'low_confidence_accuracy': 0.0,
+                'avg_confidence': 0.0,
+                'profit_prediction_rmse': 0.0,
+                'period_days': 30
+            }
+    
     async def _generate_initial_training_data(self):
         """
         ⚡ Generiert sofort Trainingsdaten für sofortiges Training mit 80/20 Split

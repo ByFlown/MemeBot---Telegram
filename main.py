@@ -128,6 +128,13 @@ class MemeBot:
         uptime = datetime.now() - self.start_time if hasattr(self, 'start_time') else timedelta(0)
         success_rate = (self.successful_trades / max(self.total_trades, 1)) * 100
         
+        # Get paper trading P&L if in paper mode
+        if not self.real_mode and self.wallet_manager.paper_mode:
+            paper_summary = self.wallet_manager.paper_trading.get_portfolio_summary()
+            total_profit_loss = paper_summary['total_profit_loss']
+        else:
+            total_profit_loss = self.total_profit_loss
+        
         status_msg = (
             f"📊 **Bot Status**\n\n"
             f"🟢 Online: {uptime}\n"
@@ -136,7 +143,7 @@ class MemeBot:
             f"⏱️ Scan Interval: {self.scan_interval}s\n"
             f"📈 Total Trades: {self.total_trades}\n"
             f"✅ Success Rate: {success_rate:.1f}%\n"
-            f"💰 P&L: {self.total_profit_loss:.4f} SOL\n"
+            f"💰 P&L: {total_profit_loss:.4f} SOL\n"
             f"💎 Wallet Balance: {await self.wallet_manager.get_sol_balance():.4f} SOL"
         )
         
@@ -256,18 +263,91 @@ class MemeBot:
         """Show performance dashboard"""
         if update.effective_user.id != OWNER_ID:
             return
+        
+        if not self.real_mode and self.wallet_manager.paper_mode:
+            # Paper trading performance
+            paper_summary = self.wallet_manager.paper_trading.get_portfolio_summary()
+            trade_history = self.wallet_manager.paper_trading.trade_history
             
-        metrics = await self.performance_monitor.get_metrics()
-        await update.message.reply_text(
-            f"📊 **Performance Dashboard**\n\n"
-            f"📈 24h Performance: {metrics['daily_performance']:+.2f}%\n"
-            f"📅 7d Performance: {metrics['weekly_performance']:+.2f}%\n"
-            f"🎯 Win Rate: {metrics['win_rate']:.1f}%\n"
-            f"💵 Avg Trade Size: {metrics['avg_trade_size']:.4f} SOL\n"
-            f"⏱️ Avg Hold Time: {metrics['avg_hold_time']}\n"
-            f"🔥 Best Trade: +{metrics['best_trade']:.2f}%\n"
-            f"❄️ Worst Trade: {metrics['worst_trade']:+.2f}%"
-        )
+            # Calculate basic metrics from paper trading data
+            if len(trade_history) > 0:
+                sell_trades = [t for t in trade_history if t.get('action') == 'sell']
+                if sell_trades:
+                    profits = [t.get('profit_loss_percentage', 0) for t in sell_trades if 'profit_loss_percentage' in t]
+                    if profits:
+                        avg_profit = sum(profits) / len(profits)
+                        best_trade = max(profits)
+                        worst_trade = min(profits)
+                        win_rate = len([p for p in profits if p > 0]) / len(profits) * 100
+                    else:
+                        avg_profit = best_trade = worst_trade = win_rate = 0
+                else:
+                    avg_profit = best_trade = worst_trade = win_rate = 0
+                
+                avg_trade_size = paper_summary['total_invested'] / max(len([t for t in trade_history if t.get('action') == 'buy']), 1)
+            else:
+                avg_profit = best_trade = worst_trade = win_rate = avg_trade_size = 0
+            
+            # Get ML accuracy metrics for paper trading
+            ml_accuracy_msg = ""
+            if self.self_learning_trader.is_trained:
+                accuracy_metrics = self.self_learning_trader.get_ml_accuracy_metrics()
+                if accuracy_metrics.get('total_trades_analyzed', 0) > 0:
+                    ml_accuracy_msg = (
+                        f"\n\n🤖 **ML Performance (30d):**\n"
+                        f"🎯 Direction Accuracy: {accuracy_metrics['direction_accuracy']:.1f}%\n"
+                        f"📊 Overall Accuracy: {accuracy_metrics['overall_accuracy']:.1f}%\n"
+                        f"🔍 Analyzed Trades: {accuracy_metrics['total_trades_analyzed']}\n"
+                        f"🧠 Model Performance: {accuracy_metrics['model_performance_score']:.1f}%"
+                    )
+                    
+                    if accuracy_metrics['high_conf_trade_count'] > 0:
+                        ml_accuracy_msg += f"\n⚡ High Confidence: {accuracy_metrics['high_confidence_accuracy']:.1f}%"
+            
+            await update.message.reply_text(
+                f"📊 **Paper Trading Performance**\n\n"
+                f"📈 Total Performance: {paper_summary['performance_percentage']:+.2f}%\n"
+                f"📅 Total P&L: {paper_summary['total_profit_loss']:+.4f} SOL\n"
+                f"🎯 Win Rate: {win_rate:.1f}%\n"
+                f"💵 Avg Trade Size: {avg_trade_size:.4f} SOL\n"
+                f"⏱️ Total Trades: {paper_summary['total_trades']}\n"
+                f"🔥 Best Trade: +{best_trade:.2f}%\n"
+                f"❄️ Worst Trade: {worst_trade:+.2f}%\n"
+                f"💰 Current Balance: {paper_summary['current_balance']:.4f} SOL\n"
+                f"📊 Active Positions: {paper_summary['active_positions_count']}"
+                f"{ml_accuracy_msg}"
+            )
+        else:
+            # Real trading performance
+            metrics = await self.performance_monitor.get_metrics()
+            
+            # Get ML accuracy metrics for real trading
+            ml_accuracy_msg = ""
+            if self.self_learning_trader.is_trained:
+                accuracy_metrics = self.self_learning_trader.get_ml_accuracy_metrics()
+                if accuracy_metrics.get('total_trades_analyzed', 0) > 0:
+                    ml_accuracy_msg = (
+                        f"\n\n🤖 **ML Performance (30d):**\n"
+                        f"🎯 Direction Accuracy: {accuracy_metrics['direction_accuracy']:.1f}%\n"
+                        f"📊 Overall Accuracy: {accuracy_metrics['overall_accuracy']:.1f}%\n"
+                        f"🔍 Analyzed Trades: {accuracy_metrics['total_trades_analyzed']}\n"
+                        f"🧠 Model Performance: {accuracy_metrics['model_performance_score']:.1f}%"
+                    )
+                    
+                    if accuracy_metrics['high_conf_trade_count'] > 0:
+                        ml_accuracy_msg += f"\n⚡ High Confidence: {accuracy_metrics['high_confidence_accuracy']:.1f}%"
+            
+            await update.message.reply_text(
+                f"📊 **Performance Dashboard**\n\n"
+                f"📈 24h Performance: {metrics['daily_performance']:+.2f}%\n"
+                f"📅 7d Performance: {metrics['weekly_performance']:+.2f}%\n"
+                f"🎯 Win Rate: {metrics['win_rate']:.1f}%\n"
+                f"💵 Avg Trade Size: {metrics['avg_trade_size']:.4f} SOL\n"
+                f"⏱️ Avg Hold Time: {metrics['avg_hold_time']}\n"
+                f"🔥 Best Trade: +{metrics['best_trade']:.2f}%\n"
+                f"❄️ Worst Trade: {metrics['worst_trade']:+.2f}%"
+                f"{ml_accuracy_msg}"
+            )
     
     async def backtest_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Run backtest"""
@@ -291,15 +371,41 @@ class MemeBot:
         """Show recent logs"""
         if update.effective_user.id != OWNER_ID:
             return
-            
-        logs = self.trading_logger.get_recent_logs(10)
-        msg = "📝 **Recent Trading Logs**\n\n"
         
-        for log in logs:
-            msg += f"🕐 {log['timestamp']}\n"
-            msg += f"📊 {log['action']} - {log['symbol']}\n"
-            msg += f"💰 {log['amount']:.4f} SOL\n"
-            msg += f"📈 Result: {log['result']}\n\n"
+        if not self.real_mode and self.wallet_manager.paper_mode:
+            # Paper trading logs
+            trade_history = self.wallet_manager.paper_trading.trade_history[-10:]  # Last 10 trades
+            msg = "📝 **Recent Paper Trading Logs**\n\n"
+            
+            for trade in reversed(trade_history):  # Show newest first
+                timestamp = trade.get('timestamp', '')[:19].replace('T', ' ')  # Format timestamp
+                action = trade.get('action', 'UNKNOWN').upper()
+                symbol = trade.get('token_symbol', 'UNKNOWN')
+                
+                if action == 'BUY':
+                    amount = trade.get('amount_sol', 0)
+                    price = trade.get('token_price', 0)
+                    msg += f"🕐 {timestamp}\n"
+                    msg += f"📊 {action} - {symbol}\n"
+                    msg += f"💰 {amount:.4f} SOL @ ${price:.6f}\n"
+                    msg += f"📈 Result: ✅ Success\n\n"
+                elif action == 'SELL':
+                    sol_received = trade.get('sol_received', 0)
+                    profit_loss = trade.get('profit_loss_percentage', 0)
+                    msg += f"🕐 {timestamp}\n"
+                    msg += f"📊 {action} - {symbol}\n"
+                    msg += f"💰 {sol_received:.4f} SOL ({profit_loss:+.2f}%)\n"
+                    msg += f"📈 Result: {'✅ Profit' if profit_loss > 0 else '📉 Loss'}\n\n"
+        else:
+            # Real trading logs
+            logs = self.trading_logger.get_recent_logs(10)
+            msg = "📝 **Recent Trading Logs**\n\n"
+            
+            for log in logs:
+                msg += f"🕐 {log['timestamp']}\n"
+                msg += f"📊 {log['action']} - {log['symbol']}\n"
+                msg += f"💰 {log['amount']:.4f} SOL\n"
+                msg += f"📈 Result: {log['result']}\n\n"
         
         await update.message.reply_text(msg[:4000])  # Telegram message limit
     
@@ -363,6 +469,24 @@ class MemeBot:
                 msg += f"• Stop Loss: {model_perf.get('stop_loss_threshold', -0.15)*100:+.0f}%\n"
                 msg += f"• Online Learning: {'✅' if model_perf.get('online_learning_enabled', False) else '❌'}\n"
                 msg += f"• Performance Score: {model_perf.get('current_performance_score', 0)*100:+.2f}%\n"
+            
+            # ML Accuracy Metrics
+            if stats.get('model_trained', False):
+                accuracy_metrics = self.self_learning_trader.get_ml_accuracy_metrics()
+                
+                if accuracy_metrics.get('total_trades_analyzed', 0) > 0:
+                    msg += f"\n🎯 **ML Accuracy Analysis (30d):**\n"
+                    msg += f"• Trades Analyzed: {accuracy_metrics['total_trades_analyzed']}\n"
+                    msg += f"• Direction Accuracy: {accuracy_metrics['direction_accuracy']:.1f}%\n"
+                    msg += f"• Overall Accuracy: {accuracy_metrics['overall_accuracy']:.1f}%\n"
+                    msg += f"• Model Performance: {accuracy_metrics['model_performance_score']:.1f}%\n"
+                    
+                    if accuracy_metrics['high_conf_trade_count'] > 0:
+                        msg += f"• High Confidence (>70%): {accuracy_metrics['high_confidence_accuracy']:.1f}% ({accuracy_metrics['high_conf_trade_count']} trades)\n"
+                    if accuracy_metrics['low_conf_trade_count'] > 0:
+                        msg += f"• Low Confidence (≤50%): {accuracy_metrics['low_confidence_accuracy']:.1f}% ({accuracy_metrics['low_conf_trade_count']} trades)\n"
+                    
+                    msg += f"• Confidence Calibration: {accuracy_metrics['confidence_calibration']:+.1f}%\n"
             
             # Confidence Analysis
             if stats.get('avg_confidence', 0) > 0:
@@ -664,8 +788,12 @@ class MemeBot:
                                 token_symbol=token.get('symbol', 'UNKNOWN')
                             )
                             
-                            # Log trade
-                            self.trading_logger.log_trade(token, trade_result, ml_decision)
+                            # Log trade with proper amount data
+                            ml_decision_with_amount = {
+                                **ml_decision,
+                                'amount': trade_result.get('amount_sol', 0.01)  # Get actual amount from trade result
+                            }
+                            self.trading_logger.log_trade(token, trade_result, ml_decision_with_amount)
                             
                             # Note: No manual model update needed - the self-learning system
                             # automatically learns from price movements via price tracking!
@@ -674,6 +802,12 @@ class MemeBot:
                             self.total_trades += 1
                             if trade_result.get('success'):
                                 self.successful_trades += 1
+                                
+                                # Update profit/loss tracking for paper trading
+                                if hasattr(trade_result, 'get'):
+                                    profit_loss = trade_result.get('profit_loss', 0)
+                                    if profit_loss != 0:
+                                        self.total_profit_loss += profit_loss
                     
                     except Exception as e:
                         logger.error(f"Error processing token {token.get('symbol', 'unknown')}: {e}")
