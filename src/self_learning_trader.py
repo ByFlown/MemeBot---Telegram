@@ -37,11 +37,14 @@ class SelfLearningTrader:
     - Scored neue Tokens ohne Regelwerk
     """
     
-    def __init__(self):
+    def __init__(self, wallet_manager=None):
         self.data_dir = Path("storage/ml_data")
         self.model_dir = Path("storage/models")
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.model_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Wallet manager for executing actual sell trades
+        self.wallet_manager = wallet_manager
         
         # Profit-Based Learning Configuration (no fixed timeframes)
         self.min_trade_amount = 0.01  # Minimum SOL amount per trade
@@ -248,7 +251,8 @@ class SelfLearningTrader:
                 'position_size': position_size,
                 'ml_confidence': ml_confidence,
                 'features': features,
-                'token_data': token_data
+                'token_data': token_data,
+                'token_symbol': token_data.get('symbol', 'UNKNOWN')
             }
             
             # Save to database
@@ -374,6 +378,26 @@ class SelfLearningTrader:
             position_size = position['position_size']
             ml_confidence = position['ml_confidence']
             entry_time = position['entry_time']
+            token_symbol = position.get('token_symbol', 'UNKNOWN')
+            
+            # 🔄 EXECUTE ACTUAL SELL TRADE through wallet manager
+            if self.wallet_manager:
+                logger.info(f"Executing sell trade for {token_symbol} ({token_address[:8]}...)")
+                trade_result = await self.wallet_manager.execute_trade(
+                    token_address=token_address,
+                    amount_sol=0,  # Amount not needed for sell - sells entire position
+                    action='sell',
+                    token_price=exit_price,
+                    token_symbol=token_symbol
+                )
+                
+                if not trade_result.get('success', False):
+                    logger.error(f"Failed to execute sell trade for {token_symbol}: {trade_result.get('error', 'Unknown error')}")
+                    # Continue with position tracking even if trade fails
+                else:
+                    logger.info(f"✅ Successfully sold {token_symbol} - Trade result: {trade_result}")
+            else:
+                logger.warning("No wallet manager available - position closed in tracking only")
             
             # Calculate profit/loss
             profit_pct = (exit_price - entry_price) / entry_price

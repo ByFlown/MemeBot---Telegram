@@ -65,8 +65,8 @@ class MemeBot:
         self.scanner = DexScreenerScanner()
         self.onchain_analyzer = OnchainAnalyzer()
         self.ai_trader = AITrader()  # Keep old system for comparison
-        self.self_learning_trader = SelfLearningTrader()  # NEW: Self-learning system
         self.wallet_manager = WalletManager()
+        self.self_learning_trader = SelfLearningTrader(self.wallet_manager)  # NEW: Self-learning system with wallet access
         self.backtester = Backtester()
         self.trading_logger = TradingLogger()
         self.performance_monitor = PerformanceMonitor()
