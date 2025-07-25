@@ -251,7 +251,16 @@ class WalletManager:
                 if action == 'buy':
                     return self.paper_trading.execute_buy_trade(token_address, amount_sol, token_price, token_symbol)
                 else:  # sell
-                    return self.paper_trading.execute_sell_trade(token_address, token_price, 1.0)  # Sell 100%
+                    # For sell trades, get current market price instead of using potentially stale token_price
+                    current_price = await self._get_current_token_price(token_address)
+                    if current_price is not None and current_price > 0:
+                        exit_price = current_price
+                        logger.info(f"Using current market price for sell: ${exit_price:.6f}")
+                    else:
+                        exit_price = token_price
+                        logger.warning(f"Could not fetch current price for {token_address}, using provided price: ${exit_price:.6f}")
+                    
+                    return self.paper_trading.execute_sell_trade(token_address, exit_price, 1.0)  # Sell 100%
             
             # Real trading mode
             if not self.is_configured():
@@ -467,6 +476,29 @@ class WalletManager:
                 else:
                     position['amount_sol'] -= amount_sol
     
+    async def _get_current_token_price(self, token_address: str) -> Optional[float]:
+        """Get current token price from DexScreener API"""
+        try:
+            session = await self.get_session()
+            url = f"https://api.dexscreener.com/latest/dex/tokens/{token_address}"
+            
+            async with session.get(url) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    pairs = data.get('pairs', [])
+                    
+                    if pairs:
+                        # Get price from first pair (usually most liquid)
+                        pair = pairs[0]
+                        price_str = pair.get('priceUsd', '0')
+                        return float(price_str) if price_str else None
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error getting current price for {token_address}: {e}")
+            return None
+    
     async def close_all_positions(self) -> List[Dict]:
         """Emergency close all positions"""
         try:
@@ -474,12 +506,16 @@ class WalletManager:
             
             # Paper trading mode
             if self.paper_mode:
-                # Get current prices for all positions (simplified - use entry prices)
+                # Get current prices for all positions from DexScreener
                 current_prices = {}
                 for token_address, position in self.paper_trading.get_all_positions().items():
-                    # In a real implementation, you'd fetch current prices from DexScreener
-                    # For now, use entry price as a fallback
-                    current_prices[token_address] = position.get('entry_price', 0.0)
+                    current_price = await self._get_current_token_price(token_address)
+                    if current_price is not None and current_price > 0:
+                        current_prices[token_address] = current_price
+                    else:
+                        # Fallback to entry price if we can't get current price
+                        current_prices[token_address] = position.get('entry_price', 0.0)
+                        logger.warning(f"Could not fetch current price for {token_address}, using entry price")
                 
                 closed_positions_data = self.paper_trading.close_all_positions(current_prices)
                 return closed_positions_data
