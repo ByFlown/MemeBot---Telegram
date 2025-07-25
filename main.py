@@ -111,6 +111,8 @@ class MemeBot:
                 "/clearmodel - Clear model for fresh training\n"
                 "/dump - Emergency stop all positions\n"
                 "/addfunds <amount> - Add SOL to paper trading account\n"
+                "/grant [amount] - Interactive SOL grant with presets\n"
+                "/refill [target] - Auto-refill to target balance (default 100)\n"
                 "/resetaccount - Reset paper trading account\n"
                 "/portfolio - Show detailed portfolio summary",
                 parse_mode='Markdown'
@@ -634,7 +636,14 @@ class MemeBot:
             return
         
         if not context.args:
-            await update.message.reply_text("Usage: /addfunds <amount>\nExample: /addfunds 50")
+            await update.message.reply_text(
+                "💰 **Add Funds to Paper Trading**\n\n"
+                "Usage: `/addfunds <amount>`\n"
+                "Example: `/addfunds 50`\n\n"
+                "💡 **Quick Options:**\n"
+                "• `/grant` - Interactive grant with preset amounts\n"
+                "• `/refill` - Quick refill to 100 SOL"
+            )
             return
         
         try:
@@ -643,12 +652,26 @@ class MemeBot:
                 await update.message.reply_text("❌ Amount must be greater than 0")
                 return
             
+            if amount > 10000:
+                await update.message.reply_text("❌ Maximum amount is 10,000 SOL per transaction")
+                return
+            
             if self.wallet_manager.paper_mode:
+                old_balance = self.wallet_manager.paper_trading.get_balance()
                 self.wallet_manager.paper_trading.add_funds(amount, "Manual deposit via Telegram")
                 new_balance = self.wallet_manager.paper_trading.get_balance()
+                
+                # Calculate percentage increase safely
+                percentage_increase = ((new_balance - old_balance) / old_balance * 100) if old_balance > 0 else 0
+                
                 await update.message.reply_text(
-                    f"✅ **Added {amount:.4f} SOL to paper trading account**\n\n"
-                    f"New Balance: {new_balance:.4f} SOL"
+                    f"💰 **Funds Added Successfully!**\n\n"
+                    f"📊 **Transaction Details:**\n"
+                    f"• Amount Added: {amount:.4f} SOL\n"
+                    f"• Previous Balance: {old_balance:.4f} SOL\n"
+                    f"• New Balance: {new_balance:.4f} SOL\n"
+                    f"• Increase: +{percentage_increase:.1f}% " + ("📈" if percentage_increase > 0 else "") + "\n\n"
+                    f"✅ Ready for paper trading!"
                 )
             else:
                 await update.message.reply_text("❌ This command only works in paper trading mode")
@@ -657,6 +680,120 @@ class MemeBot:
             await update.message.reply_text("❌ Please provide a valid number")
         except Exception as e:
             await update.message.reply_text(f"❌ Error adding funds: {e}")
+    
+    async def grant_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Interactive grant command with preset amounts"""
+        if update.effective_user.id != OWNER_ID:
+            return
+        
+        if not self.wallet_manager.paper_mode:
+            await update.message.reply_text("❌ Grant command only works in paper trading mode")
+            return
+        
+        try:
+            current_balance = self.wallet_manager.paper_trading.get_balance()
+            
+            # If amount is provided, grant it directly
+            if context.args:
+                try:
+                    amount = float(context.args[0])
+                    if amount <= 0:
+                        await update.message.reply_text("❌ Grant amount must be greater than 0")
+                        return
+                    if amount > 50000:
+                        await update.message.reply_text("❌ Maximum grant amount is 50,000 SOL")
+                        return
+                    
+                    self.wallet_manager.paper_trading.add_funds(amount, f"Admin grant via /grant command")
+                    new_balance = self.wallet_manager.paper_trading.get_balance()
+                    
+                    await update.message.reply_text(
+                        f"🎁 **SOL Grant Approved!**\n\n"
+                        f"💎 **Grant Details:**\n"
+                        f"• Granted Amount: {amount:.4f} SOL\n"
+                        f"• Previous Balance: {current_balance:.4f} SOL\n"
+                        f"• New Balance: {new_balance:.4f} SOL\n"
+                        f"• Total Increase: +{(new_balance - current_balance):.4f} SOL\n\n"
+                        f"🚀 **Happy Trading!**"
+                    )
+                    return
+                    
+                except ValueError:
+                    await update.message.reply_text("❌ Invalid grant amount. Please provide a valid number.")
+                    return
+            
+            # Interactive mode with preset amounts
+            await update.message.reply_text(
+                f"🎁 **Paper Trading SOL Grant**\n\n"
+                f"💰 Current Balance: {current_balance:.4f} SOL\n\n"
+                f"**Quick Grant Options:**\n"
+                f"• `/grant 10` - Grant 10 SOL (Small boost)\n"
+                f"• `/grant 50` - Grant 50 SOL (Medium boost) \n"
+                f"• `/grant 100` - Grant 100 SOL (Large boost)\n"
+                f"• `/grant 500` - Grant 500 SOL (Major funding)\n"
+                f"• `/grant 1000` - Grant 1000 SOL (Whale mode)\n\n"
+                f"💡 **Custom Amount:** `/grant <amount>`\n"
+                f"Example: `/grant 75.5`\n\n"
+                f"📈 **Status:** Ready to trade with current balance"
+            )
+            
+        except Exception as e:
+            await update.message.reply_text(f"❌ Error processing grant: {e}")
+    
+    async def refill_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Quick refill to target balance"""
+        if update.effective_user.id != OWNER_ID:
+            return
+        
+        if not self.wallet_manager.paper_mode:
+            await update.message.reply_text("❌ Refill command only works in paper trading mode")
+            return
+        
+        try:
+            current_balance = self.wallet_manager.paper_trading.get_balance()
+            
+            # Default target balance or custom target
+            target_balance = 100.0  # Default target
+            if context.args:
+                try:
+                    target_balance = float(context.args[0])
+                    if target_balance <= 0:
+                        await update.message.reply_text("❌ Target balance must be greater than 0")
+                        return
+                    if target_balance > 50000:
+                        await update.message.reply_text("❌ Maximum target balance is 50,000 SOL")
+                        return
+                except ValueError:
+                    await update.message.reply_text("❌ Invalid target balance. Using default 100 SOL.")
+                    target_balance = 100.0
+            
+            if current_balance >= target_balance:
+                await update.message.reply_text(
+                    f"💰 **No Refill Needed**\n\n"
+                    f"Current Balance: {current_balance:.4f} SOL\n"
+                    f"Target Balance: {target_balance:.4f} SOL\n\n"
+                    f"✅ Balance is already at or above target!"
+                )
+                return
+            
+            # Calculate refill amount
+            refill_amount = target_balance - current_balance
+            
+            self.wallet_manager.paper_trading.add_funds(refill_amount, f"Auto-refill to {target_balance} SOL")
+            new_balance = self.wallet_manager.paper_trading.get_balance()
+            
+            await update.message.reply_text(
+                f"⛽ **Account Refilled Successfully!**\n\n"
+                f"🔄 **Refill Details:**\n"
+                f"• Previous Balance: {current_balance:.4f} SOL\n"
+                f"• Target Balance: {target_balance:.4f} SOL\n"
+                f"• Refill Amount: {refill_amount:.4f} SOL\n"
+                f"• New Balance: {new_balance:.4f} SOL\n\n"
+                f"🎯 **Target Achieved!** Ready for more trading."
+            )
+            
+        except Exception as e:
+            await update.message.reply_text(f"❌ Error during refill: {e}")
     
     async def resetaccount_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Reset paper trading account"""
@@ -887,6 +1024,8 @@ class MemeBot:
                 BotCommand("clearmodel", "Clear ML model for fresh 80/20 training"),
                 BotCommand("dump", "Emergency stop - close all positions"),
                 BotCommand("addfunds", "Add SOL to paper trading account"),
+                BotCommand("grant", "Interactive SOL grant with presets"),
+                BotCommand("refill", "Auto-refill to target balance"),
                 BotCommand("resetaccount", "Reset paper trading account"),
                 BotCommand("portfolio", "Show detailed portfolio summary")
             ]
@@ -952,6 +1091,8 @@ async def main():
         application.add_handler(CommandHandler("quickstart", bot.quickstart_command))
         application.add_handler(CommandHandler("clearmodel", bot.clearmodel_command))
         application.add_handler(CommandHandler("addfunds", bot.addfunds_command))
+        application.add_handler(CommandHandler("grant", bot.grant_command))
+        application.add_handler(CommandHandler("refill", bot.refill_command))
         application.add_handler(CommandHandler("resetaccount", bot.resetaccount_command))
         application.add_handler(CommandHandler("portfolio", bot.portfolio_command))
         

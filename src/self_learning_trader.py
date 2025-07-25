@@ -157,6 +157,19 @@ class SelfLearningTrader:
         """
         )
 
+        # Migrate existing databases - add missing columns if they don't exist
+        try:
+            cursor.execute("ALTER TABLE training_data ADD COLUMN position_closed INTEGER DEFAULT 0")
+        except sqlite3.OperationalError:
+            # Column already exists
+            pass
+        
+        try:
+            cursor.execute("ALTER TABLE training_data ADD COLUMN trade_executed INTEGER DEFAULT 0")
+        except sqlite3.OperationalError:
+            # Column already exists
+            pass
+
         conn.commit()
         conn.close()
 
