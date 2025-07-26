@@ -925,6 +925,15 @@ class MemeBot:
                                 token_symbol=token.get('symbol', 'UNKNOWN')
                             )
                             
+                            # IMPORTANT: Also track position in ML system for automatic closing
+                            if trade_result.get('success'):
+                                await self.self_learning_trader.open_position(
+                                    combined_data, 
+                                    ml_decision['confidence'], 
+                                    0.01  # Same amount as executed trade
+                                )
+                                logger.info(f"✅ Position tracked in ML system for {token.get('symbol', 'UNKNOWN')}")
+                            
                             # Log trade with proper amount data
                             ml_decision_with_amount = {
                                 **ml_decision,
@@ -1114,6 +1123,10 @@ async def main():
         
         logger.info("✅ MemeBot Telegram bot is running!")
         logger.info(f"📱 Bot username: @{application.bot.username}")
+        
+        # Start position monitoring for the self-learning trader
+        bot.self_learning_trader.start_position_monitoring()
+        logger.info("🔍 Position monitoring started for self-learning trader")
         
         # Start trading loop
         trading_task = asyncio.create_task(bot.scan_and_trade())

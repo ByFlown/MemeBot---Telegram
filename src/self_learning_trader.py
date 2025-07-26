@@ -324,38 +324,58 @@ class SelfLearningTrader:
         🔍 Starts background task to monitor all active positions
         """
         try:
-            # Only start monitoring if there's an event loop running
+            # Try to start monitoring with current event loop
             loop = asyncio.get_running_loop()
             if self.position_monitor_task is None or self.position_monitor_task.done():
                 self.position_monitor_task = asyncio.create_task(
                     self.monitor_positions_continuously()
                 )
-                logger.info("Started position monitoring task")
+                logger.info("🔍 Position monitoring task started successfully")
+            else:
+                logger.info("🔍 Position monitoring task already running")
         except RuntimeError:
-            # No event loop running - monitoring will start when first trade is made
-            logger.debug(
-                "No event loop running - position monitoring will start when needed"
+            # No event loop running - will be started when first trade is made
+            logger.warning(
+                "⚠️ No event loop running - position monitoring will start when first trade is made"
             )
 
     async def monitor_positions_continuously(self):
         """
         🔄 Continuously monitors all active positions for exit conditions
         """
+        logger.info("🔄 Starting continuous position monitoring loop")
+        
         while True:
             try:
                 await asyncio.sleep(30)  # Check every 30 seconds
+                
+                # Debug: Log that monitoring is active
+                logger.debug("🔍 Position monitoring loop running...")
 
-                if not self.active_positions:
+                # Check both ML tracked positions and paper trading positions
+                ml_positions_count = len(self.active_positions)
+                paper_positions = {}
+                
+                if self.wallet_manager and hasattr(self.wallet_manager, 'paper_trading'):
+                    paper_positions = self.wallet_manager.paper_trading.get_all_positions()
+                
+                paper_positions_count = len(paper_positions)
+                
+                if ml_positions_count == 0 and paper_positions_count == 0:
                     continue
+                
+                logger.debug(f"🔍 Monitoring {ml_positions_count} ML positions and {paper_positions_count} paper positions")
 
                 positions_to_close = []
                 current_time = datetime.now()
 
+                # Monitor ML tracked positions
                 for token_address, position in list(self.active_positions.items()):
                     try:
                         # Get current price
                         current_price = await self.get_current_price(token_address)
                         if current_price is None or current_price <= 0:
+                            logger.warning(f"Could not get current price for {token_address[:8]}...")
                             continue
 
                         entry_price = position["entry_price"]
@@ -373,10 +393,57 @@ class SelfLearningTrader:
                             positions_to_close.append(
                                 (token_address, current_price, exit_reason)
                             )
+                            logger.info(f"🎯 Exit condition met for {position.get('token_symbol', 'UNKNOWN')}: {exit_reason} (profit: {profit_pct:.2%})")
 
                     except Exception as e:
                         logger.error(f"Error monitoring position {token_address}: {e}")
                         continue
+
+                # Also monitor paper trading positions that aren't in ML tracking
+                for token_address, paper_pos in paper_positions.items():
+                    if token_address not in self.active_positions:
+                        try:
+                            # Get current price for paper-only positions
+                            current_price = await self.get_current_price(token_address)
+                            if current_price is None or current_price <= 0:
+                                continue
+
+                            # Use default exit strategy for paper-only positions
+                            entry_price = paper_pos.get('entry_price', 0)
+                            if entry_price > 0:
+                                profit_pct = (current_price - entry_price) / entry_price
+                                
+                                # Simple exit strategy: 10% profit or -15% loss or 24h age
+                                entry_time = paper_pos.get('entry_time')
+                                if isinstance(entry_time, str):
+                                    entry_time = datetime.fromisoformat(entry_time)
+                                elif entry_time is None:
+                                    entry_time = datetime.now() - timedelta(hours=1)  # Default age
+                                
+                                position_age = (current_time - entry_time).total_seconds() / 3600
+                                
+                                should_exit = False
+                                exit_reason = ""
+                                
+                                if profit_pct >= 0.10:  # 10% profit
+                                    should_exit = True
+                                    exit_reason = "profit_target"
+                                elif profit_pct <= -0.15:  # 15% loss
+                                    should_exit = True
+                                    exit_reason = "stop_loss"
+                                elif position_age >= 24:  # 24 hours
+                                    should_exit = True
+                                    exit_reason = "max_age"
+                                
+                                if should_exit:
+                                    positions_to_close.append(
+                                        (token_address, current_price, exit_reason)
+                                    )
+                                    logger.info(f"🎯 Exit condition met for paper-only position {paper_pos.get('token_symbol', 'UNKNOWN')}: {exit_reason} (profit: {profit_pct:.2%})")
+
+                        except Exception as e:
+                            logger.error(f"Error monitoring paper position {token_address}: {e}")
+                            continue
 
                 # Close positions that meet exit criteria
                 for token_address, exit_price, exit_reason in positions_to_close:
@@ -545,7 +612,8 @@ class SelfLearningTrader:
         try:
             import aiohttp
 
-            async with aiohttp.ClientSession() as session:
+            timeout = aiohttp.ClientTimeout(total=10)  # 10 second timeout
+            async with aiohttp.ClientSession(timeout=timeout) as session:
                 url = f"https://api.dexscreener.com/latest/dex/tokens/{token_address}"
 
                 async with session.get(url) as response:
@@ -557,12 +625,17 @@ class SelfLearningTrader:
                             # Get price from first pair
                             pair = pairs[0]
                             price_str = pair.get("priceUsd", "0")
-                            return float(price_str) if price_str else 0.0
-
-            return None
+                            price = float(price_str) if price_str else 0.0
+                            
+                            if price > 0:
+                                logger.debug(f"💰 Current price for {token_address[:8]}...: ${price:.8f}")
+                                return price
+                    
+                    logger.warning(f"⚠️ No valid price data from DexScreener for {token_address[:8]}...")
+                    return None
 
         except Exception as e:
-            logger.error(f"Error getting current price for {token_address}: {e}")
+            logger.error(f"Error getting current price for {token_address[:8]}...: {e}")
             return None
 
     def calculate_profit_reward(
