@@ -1348,7 +1348,11 @@ class SelfLearningTrader:
                 expected_profit = self.model.predict(feature_vector_scaled)[0]
 
                 # Calculate confidence based on recent model performance
-                confidence = self._calculate_prediction_confidence()
+                try:
+                    confidence = self._calculate_prediction_confidence()
+                except Exception as e:
+                    logger.warning(f"Failed to calculate prediction confidence: {e}. Using default confidence.")
+                    confidence = 0.5  # Default confidence when calculation fails
 
                 # Trading decision based on expected profit and confidence
                 should_trade = (
