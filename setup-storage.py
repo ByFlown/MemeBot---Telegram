@@ -12,8 +12,10 @@ def setup_storage():
     print("📁 Setting up MemeBot storage...")
     
     # Define directories
-    storage_dirs = ["storage/models", "storage/logs", "storage/data"]
+    storage_dirs = ["storage/models", "storage/logs", "storage/data", "storage/ml_data"]
     link_dirs = ["models", "logs", "data"]
+    
+    # Also create ml_data directory (no symlink needed as it's referenced directly)
     
     try:
         # Create storage directories in the mounted volume
