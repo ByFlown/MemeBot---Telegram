@@ -648,49 +648,68 @@ class SelfLearningTrader:
     ) -> float:
         """
         🏆 Calculates reward score based on actual trading profit
-        Higher rewards for profitable trades, scaled by confidence and efficiency
+        REBALANCED: Profits are always rewarded more than losses are punished
         """
         try:
             # Base reward from profit percentage (main component)
             base_reward = profit_pct * self.profit_scaling_factor
 
-            # Confidence multiplier - reward confident successful trades more
+            # Rebalanced confidence multiplier - favor profits over losses
             if profit_pct > 0:
-                confidence_multiplier = 1.0 + (
-                    ml_confidence - 0.5
-                )  # 0.5-1.5x multiplier
+                # ENHANCED: Stronger rewards for confident successful trades
+                confidence_multiplier = 1.0 + (ml_confidence - 0.5) * 1.5  # Up to 1.75x multiplier for profits
             else:
-                confidence_multiplier = 1.0 - (
-                    ml_confidence - 0.5
-                )  # Penalize confident losses more
+                # REBALANCED: Moderate punishment for confident bad trades (less than profit rewards)
+                confidence_punishment = 1.0 + (ml_confidence - 0.5) * 1.0  # Up to 1.5x punishment (less than profit multiplier)
+                confidence_multiplier = confidence_punishment
 
-            # Time efficiency bonus - reward faster profitable trades
-            time_bonus = 0.0
+            # Time efficiency bonus/penalty - favor profits
+            hours = holding_duration / 60
+            time_modifier = 0.0
+            
             if profit_pct > 0:
-                # Bonus for making profit quickly (inversely proportional to time)
-                hours = holding_duration / 60
+                # ENHANCED: Bigger bonus for making profit quickly
                 if hours > 0:
-                    time_bonus = min(0.3, 1.0 / hours)  # Max 30% bonus
+                    time_modifier = min(0.5, 1.5 / hours)  # Max 50% bonus (increased from 30%)
+            else:
+                # REBALANCED: Smaller penalty for holding losing trades
+                if hours > 4:  # Penalty after 4 hours for losses (increased from 2 hours)
+                    time_modifier = -min(0.2, hours / 20.0)  # Up to -20% penalty (reduced from -40%)
 
-            # Exit reason modifiers
+            # Rebalanced exit reason modifiers - bigger profit bonuses, smaller loss penalties
             exit_modifiers = {
-                "profit_target_high_confidence": 0.2,  # Bonus for systematic profit taking
-                "profit_target_medium_confidence": 0.1,
-                "profit_target_low_confidence": 0.05,
-                "stop_loss": -0.1,  # Small penalty for stop losses
-                "max_age": -0.05,  # Small penalty for holding too long
-                "time_exit_low_confidence": 0.0,  # Neutral for time-based exits
+                "profit_target_high_confidence": 0.3,  # ENHANCED: Bigger bonus for systematic profit taking
+                "profit_target_medium_confidence": 0.2,  # ENHANCED: Increased bonus
+                "profit_target_low_confidence": 0.1,   # ENHANCED: Increased bonus
+                "stop_loss": -0.15,  # REBALANCED: Smaller penalty for stop losses (reduced from -0.3)
+                "max_age": -0.1,     # REBALANCED: Smaller penalty for holding too long (reduced from -0.2)
+                "time_exit_low_confidence": -0.05,  # REBALANCED: Minimal penalty for uncertain exits
             }
 
             exit_modifier = exit_modifiers.get(exit_reason, 0.0)
 
-            # Calculate final reward
-            total_reward = (
-                (base_reward * confidence_multiplier) + time_bonus + exit_modifier
-            )
+            # REBALANCED: Moderate punishment factors for losses (less than profit rewards)
+            loss_punishment_multiplier = 1.0
+            if profit_pct < 0:
+                # REBALANCED: More moderate punishment scaling
+                loss_severity = abs(profit_pct)
+                if loss_severity > 0.10:  # Only for losses >10% (increased threshold)
+                    loss_punishment_multiplier = 1.0 + (loss_severity * 1.0)  # Up to 2x punishment (reduced from 3x)
+                
+                # REBALANCED: Reduced extra punishment for large confident losses
+                if ml_confidence > 0.8 and loss_severity > 0.15:  # Higher thresholds
+                    loss_punishment_multiplier *= 1.2  # Only 20% additional punishment (reduced from 50%)
 
-            # Clamp reward between -2.0 and 2.0 to allow for strong signals
-            return max(-2.0, min(2.0, total_reward))
+            # Calculate final reward with profit-favoring balance
+            if profit_pct >= 0:
+                # For profits: enhanced reward with bigger bonuses
+                total_reward = (base_reward * confidence_multiplier) + time_modifier + exit_modifier
+            else:
+                # For losses: moderate punishment (always less than equivalent profit reward)
+                total_reward = (base_reward * confidence_multiplier * loss_punishment_multiplier) + time_modifier + exit_modifier
+
+            # REBALANCED: Asymmetric clamping - bigger positive rewards, smaller negative punishment
+            return max(-2.0, min(3.0, total_reward))  # -2.0 to +3.0 (favors positive rewards)
 
         except Exception as e:
             logger.error(f"Error calculating profit reward: {e}")
@@ -701,6 +720,7 @@ class SelfLearningTrader:
     ):
         """
         🧠 Updates the online learning model with profit-based feedback
+        Enhanced with stronger learning from losses
         """
         try:
             # For unsupervised learning, we initialize the model with the first training example
@@ -734,16 +754,40 @@ class SelfLearningTrader:
             feature_df = pd.DataFrame(feature_data)
             feature_vector_scaled = self.scaler.transform(feature_df)
 
-            # Use profit percentage as target for online learning
-            # Weight the learning by reward magnitude (profitable trades get more weight)
-            sample_weight = max(0.1, abs(reward))  # Minimum weight of 0.1
+            # REBALANCED: Favor learning from profits more than losses
+            # Base weight from reward magnitude
+            base_weight = max(0.1, abs(reward))
+            
+            # Rebalanced learning weights - favor profits
+            if profit_pct > 0:
+                # ENHANCED: Stronger learning from profitable trades
+                profit_magnitude = profit_pct
+                if profit_magnitude > 0.05:  # More than 5% profit
+                    base_weight *= 1.8  # 80% stronger learning from significant profits
+                if profit_magnitude > 0.15:  # More than 15% profit
+                    base_weight *= 2.5  # Even stronger learning from major profits
+                
+                # Log enhanced learning from profits
+                logger.info(f"✅ Enhanced learning from profit: {profit_pct:.2%} with weight {base_weight:.2f}")
+            else:
+                # REBALANCED: Moderate learning from losses (less than profits)
+                loss_severity = abs(profit_pct)
+                if loss_severity > 0.10:  # Only for losses >10% (higher threshold)
+                    base_weight *= 1.2  # Only 20% stronger learning from significant losses
+                if loss_severity > 0.20:  # Only for very large losses >20%
+                    base_weight *= 1.4  # Moderate increase for major losses
+                
+                # Log moderate learning from losses
+                logger.info(f"🔥 Moderate learning from loss: {profit_pct:.2%} with weight {base_weight:.2f}")
+            
+            sample_weight = base_weight
 
-            # Update online model (for continuous learning)
+            # Update online model with enhanced weights
             self.online_model.partial_fit(
                 feature_vector_scaled, [profit_pct], sample_weight=[sample_weight]
             )
 
-            # Also update main model for predictions
+            # Also update main model with enhanced weights
             self.model.partial_fit(
                 feature_vector_scaled, [profit_pct], sample_weight=[sample_weight]
             )
@@ -753,9 +797,15 @@ class SelfLearningTrader:
                 self.is_trained = True
                 logger.info("🎯 ML model is now trained and ready for predictions!")
 
-            logger.debug(
-                f"Both models updated with profit {profit_pct:.3f} and reward {reward:.3f}"
-            )
+            # Enhanced logging for losses
+            if profit_pct < 0:
+                logger.info(
+                    f"🧠 Enhanced punishment applied: profit {profit_pct:.3f}, reward {reward:.3f}, weight {sample_weight:.3f}"
+                )
+            else:
+                logger.debug(
+                    f"🧠 Models updated: profit {profit_pct:.3f}, reward {reward:.3f}, weight {sample_weight:.3f}"
+                )
 
         except Exception as e:
             logger.error(f"Error updating model with profit: {e}")
@@ -1125,9 +1175,29 @@ class SelfLearningTrader:
             y = df["profit_percentage"].fillna(
                 0
             )  # Use actual profit percentages as targets
-            sample_weights = (
-                df["reward_score"].fillna(0.1).abs() + 0.1
-            )  # Weight by reward
+            
+            # REBALANCED: Favor learning from profits more than losses in batch training
+            base_weights = df["reward_score"].fillna(0.1).abs() + 0.1
+            
+            # Apply rebalanced learning weights - favor profits over losses
+            rebalanced_weights = []
+            for idx, (profit_pct, base_weight) in enumerate(zip(y, base_weights)):
+                weight = base_weight
+                if profit_pct > 0:  # Profit - ENHANCED learning
+                    profit_magnitude = profit_pct
+                    if profit_magnitude > 0.05:  # More than 5% profit
+                        weight *= 1.8  # 80% stronger learning from profits
+                    if profit_magnitude > 0.15:  # More than 15% profit
+                        weight *= 2.5  # Even stronger learning from major profits
+                elif profit_pct < 0:  # Loss - MODERATE learning
+                    loss_severity = abs(profit_pct)
+                    if loss_severity > 0.10:  # Only for losses >10% (higher threshold)
+                        weight *= 1.2  # Only 20% stronger learning from significant losses
+                    if loss_severity > 0.20:  # Only for very large losses >20%
+                        weight *= 1.4  # Moderate increase for major losses
+                rebalanced_weights.append(weight)
+            
+            sample_weights = np.array(rebalanced_weights)  # Use rebalanced weights favoring profits
 
             if len(X) < 10:
                 logger.info("Not enough samples for training")
@@ -1209,17 +1279,22 @@ class SelfLearningTrader:
             # Save models
             self.save_models()
 
-            # Log training results
+            # Calculate loss statistics for enhanced training info
+            loss_samples = len([p for p in y if p < 0])
+            profit_samples = len([p for p in y if p >= 0])
+            
+            # Log training results with rebalanced system info
             training_log_msg = (
-                f"🧠 **Profit-Based ML Training Results**\\n"
+                f"🧠 **Rebalanced Profit-Favoring ML Training Results**\\n"
                 f"Model Type: {best_name}\\n"
-                f"Training Samples: {len(X_train)} (80%)\\n"
+                f"Training Samples: {len(X_train)} (80%) - {profit_samples} profits, {loss_samples} losses\\n"
                 f"Test Samples: {len(X_test)} (20%)\\n"
                 f"R² Score: {best_test_results['r2_score']:.3f}\\n"
                 f"MSE: {best_test_results['mse']:.4f}\\n"
                 f"MAE: {best_test_results['mae']:.4f}\\n"
                 f"Mean Profit: {best_test_results['mean_profit_pct']:.2%}\\n"
-                f"Profit Std: {best_test_results['std_profit_pct']:.2%}"
+                f"Profit Std: {best_test_results['std_profit_pct']:.2%}\\n"
+                f"✅ Profit-favoring system: Rewards > Punishments"
             )
 
             logger.info(training_log_msg)
